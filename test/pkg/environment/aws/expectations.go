@@ -23,12 +23,39 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/fis"
+	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/aws/aws-sdk-go/service/sts"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,stylecheck
 	. "github.com/onsi/gomega"    //nolint:revive,stylecheck
+	"github.com/samber/lo"
 	"go.uber.org/multierr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+// Spot Interruption experiment details partially copied from
+// https://github.com/aws/amazon-ec2-spot-interrupter/blob/main/pkg/itn/itn.go
+const (
+	fisRoleName    = "FISInterruptionRole"
+	fisTargetLimit = 5
+	spotITNAction  = "aws:ec2:send-spot-instance-interruptions"
+)
+
+func (env *Environment) ExpectWindowsIPAMEnabled() {
+	GinkgoHelper()
+	env.ExpectConfigMapDataOverridden(types.NamespacedName{Namespace: "kube-system", Name: "amazon-vpc-cni"}, map[string]string{
+		"enable-windows-ipam": "true",
+	})
+}
+
+func (env *Environment) ExpectWindowsIPAMDisabled() {
+	GinkgoHelper()
+	env.ExpectConfigMapDataOverridden(types.NamespacedName{Namespace: "kube-system", Name: "amazon-vpc-cni"}, map[string]string{
+		"enable-windows-ipam": "false",
+	})
+}
 
 func (env *Environment) ExpectInstance(nodeName string) Assertion {
 	return Expect(env.GetInstance(nodeName))
@@ -40,6 +67,48 @@ func (env *Environment) ExpectIPv6ClusterDNS() string {
 	kubeDNSIP := net.ParseIP(dnsService.Spec.ClusterIP)
 	Expect(kubeDNSIP.To4()).To(BeNil())
 	return kubeDNSIP.String()
+}
+
+func (env *Environment) ExpectSpotInterruptionExperiment(instanceIDs ...string) *fis.Experiment {
+	GinkgoHelper()
+	template := &fis.CreateExperimentTemplateInput{
+		Actions:        map[string]*fis.CreateExperimentTemplateActionInput{},
+		Targets:        map[string]*fis.CreateExperimentTemplateTargetInput{},
+		StopConditions: []*fis.CreateExperimentTemplateStopConditionInput{{Source: aws.String("none")}},
+		RoleArn:        env.ExpectSpotInterruptionRole().Arn,
+		Description:    aws.String(fmt.Sprintf("trigger spot ITN for instances %v", instanceIDs)),
+	}
+	for j, ids := range lo.Chunk(instanceIDs, fisTargetLimit) {
+		key := fmt.Sprintf("itn%d", j)
+		template.Actions[key] = &fis.CreateExperimentTemplateActionInput{
+			ActionId: aws.String(spotITNAction),
+			Parameters: map[string]*string{
+				// durationBeforeInterruption is the time before the instance is terminated, so we add 2 minutes
+				"durationBeforeInterruption": aws.String("PT120S"),
+			},
+			Targets: map[string]*string{"SpotInstances": aws.String(key)},
+		}
+		template.Targets[key] = &fis.CreateExperimentTemplateTargetInput{
+			ResourceType:  aws.String("aws:ec2:spot-instance"),
+			SelectionMode: aws.String("ALL"),
+			ResourceArns: aws.StringSlice(lo.Map(ids, func(id string, _ int) string {
+				return fmt.Sprintf("arn:aws:ec2:%s:%s:instance/%s", env.Region, env.ExpectAccountID(), id)
+			})),
+		}
+	}
+	experimentTemplate, err := env.FISAPI.CreateExperimentTemplateWithContext(env.Context, template)
+	Expect(err).ToNot(HaveOccurred())
+	experiment, err := env.FISAPI.StartExperimentWithContext(env.Context, &fis.StartExperimentInput{ExperimentTemplateId: experimentTemplate.ExperimentTemplate.Id})
+	Expect(err).ToNot(HaveOccurred())
+	return experiment.Experiment
+}
+
+func (env *Environment) ExpectExperimentTemplateDeleted(id string) {
+	GinkgoHelper()
+	_, err := env.FISAPI.DeleteExperimentTemplateWithContext(env.Context, &fis.DeleteExperimentTemplateInput{
+		Id: aws.String(id),
+	})
+	Expect(err).ToNot(HaveOccurred())
 }
 
 func (env *Environment) GetInstance(nodeName string) ec2.Instance {
@@ -123,17 +192,15 @@ func (env *Environment) GetSubnetNameAndIds(tags map[string]string) []SubnetInfo
 	}
 	var subnetInfo []SubnetInfo
 	err := env.EC2API.DescribeSubnetsPages(&ec2.DescribeSubnetsInput{Filters: filters}, func(dso *ec2.DescribeSubnetsOutput, _ bool) bool {
-		for _, subnet := range dso.Subnets {
-			for k := range subnet.Tags {
-				if aws.StringValue(subnet.Tags[k].Key) == "Name" {
-					subnetInfo = append(subnetInfo, SubnetInfo{ID: aws.StringValue(subnet.SubnetId), Name: aws.StringValue(subnet.Tags[k].Value)})
-					break
-				}
+		subnetInfo = lo.Map(dso.Subnets, func(s *ec2.Subnet, _ int) SubnetInfo {
+			elem := SubnetInfo{ID: aws.StringValue(s.SubnetId)}
+			if tag, ok := lo.Find(s.Tags, func(t *ec2.Tag) bool { return aws.StringValue(t.Key) == "Name" }); ok {
+				elem.Name = aws.StringValue(tag.Value)
 			}
-		}
+			return elem
+		})
 		return true
 	})
-
 	Expect(err).To(BeNil())
 	return subnetInfo
 }
@@ -214,4 +281,34 @@ func (env *Environment) GetCustomAMI(amiPath string, versionOffset int) string {
 	})
 	Expect(err).To(BeNil())
 	return *parameter.Parameter.Value
+}
+
+func (env *Environment) ExpectRunInstances(instanceInput *ec2.RunInstancesInput) *ec2.Reservation {
+	GinkgoHelper()
+	// implement IMDSv2
+	instanceInput.MetadataOptions = &ec2.InstanceMetadataOptionsRequest{
+		HttpEndpoint: aws.String("enabled"),
+		HttpTokens:   aws.String("required"),
+	}
+
+	out, err := env.EC2API.RunInstances(instanceInput)
+	Expect(err).ToNot(HaveOccurred())
+
+	return out
+}
+
+func (env *Environment) ExpectSpotInterruptionRole() *iam.Role {
+	GinkgoHelper()
+	out, err := env.IAMAPI.GetRoleWithContext(env.Context, &iam.GetRoleInput{
+		RoleName: aws.String(fisRoleName),
+	})
+	Expect(err).ToNot(HaveOccurred())
+	return out.Role
+}
+
+func (env *Environment) ExpectAccountID() string {
+	GinkgoHelper()
+	identity, err := env.STSAPI.GetCallerIdentityWithContext(env.Context, &sts.GetCallerIdentityInput{})
+	Expect(err).ToNot(HaveOccurred())
+	return aws.StringValue(identity.Account)
 }

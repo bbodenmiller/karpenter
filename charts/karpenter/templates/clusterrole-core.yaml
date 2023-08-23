@@ -49,8 +49,11 @@ rules:
     verbs: [ "get", "list", "watch" ]
   # Write
   - apiGroups: ["karpenter.sh"]
-    resources: ["provisioners/status", "machines", "machines/status"]
-    verbs: ["create", "delete", "patch"]
+    resources: ["machines", "machines/status"]
+    verbs: ["create", "delete", "update", "patch"]
+  - apiGroups: ["karpenter.sh"]
+    resources: ["provisioners", "provisioners/status"]
+    verbs: ["update", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
@@ -64,10 +67,6 @@ rules:
     resources: ["validatingwebhookconfigurations"]
     verbs: ["update"]
     resourceNames: ["validation.webhook.karpenter.sh", "validation.webhook.config.karpenter.sh"]
-  - apiGroups: ["admissionregistration.k8s.io"]
-    resources: ["mutatingwebhookconfigurations"]
-    verbs: ["update"]
-    resourceNames: ["defaulting.webhook.karpenter.sh"]
   {{- with .Values.additionalClusterRoleRules -}}
   {{ toYaml . | nindent 2 }}
   {{- end -}}

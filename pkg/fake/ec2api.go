@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Pallinder/go-randomdata"
 	"github.com/aws/aws-sdk-go/aws"
@@ -105,100 +106,106 @@ func (e *EC2API) Reset() {
 
 // nolint: gocyclo
 func (e *EC2API) CreateFleetWithContext(_ context.Context, input *ec2.CreateFleetInput, _ ...request.Option) (*ec2.CreateFleetOutput, error) {
-	if !e.CreateFleetBehavior.Error.IsNil() || !e.CreateFleetBehavior.Output.IsNil() {
-		return e.CreateFleetBehavior.Invoke(input)
-	}
-	if input.LaunchTemplateConfigs[0].LaunchTemplateSpecification.LaunchTemplateName == nil {
-		return nil, fmt.Errorf("missing launch template name")
-	}
-	var instanceIds []*string
-	var skippedPools []CapacityPool
-	var spotInstanceRequestID *string
+	return e.CreateFleetBehavior.Invoke(input, func(input *ec2.CreateFleetInput) (*ec2.CreateFleetOutput, error) {
+		if input.LaunchTemplateConfigs[0].LaunchTemplateSpecification.LaunchTemplateName == nil {
+			return nil, fmt.Errorf("missing launch template name")
+		}
+		var instanceIds []*string
+		var skippedPools []CapacityPool
+		var spotInstanceRequestID *string
 
-	if aws.StringValue(input.TargetCapacitySpecification.DefaultTargetCapacityType) == v1alpha5.CapacityTypeSpot {
-		spotInstanceRequestID = aws.String(test.RandomName())
-	}
+		if aws.StringValue(input.TargetCapacitySpecification.DefaultTargetCapacityType) == v1alpha5.CapacityTypeSpot {
+			spotInstanceRequestID = aws.String(test.RandomName())
+		}
 
-	for _, ltc := range input.LaunchTemplateConfigs {
-		for _, override := range ltc.Overrides {
-			skipInstance := false
-			e.InsufficientCapacityPools.Range(func(pool CapacityPool) bool {
-				if pool.InstanceType == aws.StringValue(override.InstanceType) &&
-					pool.Zone == aws.StringValue(override.AvailabilityZone) &&
-					pool.CapacityType == aws.StringValue(input.TargetCapacitySpecification.DefaultTargetCapacityType) {
-					skippedPools = append(skippedPools, pool)
-					skipInstance = true
-					return false
+		fulfilled := 0
+		for _, ltc := range input.LaunchTemplateConfigs {
+			for _, override := range ltc.Overrides {
+				skipInstance := false
+				e.InsufficientCapacityPools.Range(func(pool CapacityPool) bool {
+					if pool.InstanceType == aws.StringValue(override.InstanceType) &&
+						pool.Zone == aws.StringValue(override.AvailabilityZone) &&
+						pool.CapacityType == aws.StringValue(input.TargetCapacitySpecification.DefaultTargetCapacityType) {
+						skippedPools = append(skippedPools, pool)
+						skipInstance = true
+						return false
+					}
+					return true
+				})
+				if skipInstance {
+					continue
 				}
-				return true
-			})
-			if skipInstance {
-				continue
-			}
-			amiID := aws.String("")
-			if e.CalledWithCreateLaunchTemplateInput.Len() > 0 {
-				lt := e.CalledWithCreateLaunchTemplateInput.Pop()
-				amiID = lt.LaunchTemplateData.ImageId
-				e.CalledWithCreateLaunchTemplateInput.Add(lt)
-			}
-			instanceState := ec2.InstanceStateNameRunning
-			for i := 0; i < int(*input.TargetCapacitySpecification.TotalTargetCapacity); i++ {
-				instance := &ec2.Instance{
-					ImageId:               aws.String(*amiID),
-					InstanceId:            aws.String(test.RandomName()),
-					Placement:             &ec2.Placement{AvailabilityZone: input.LaunchTemplateConfigs[0].Overrides[0].AvailabilityZone},
-					PrivateDnsName:        aws.String(randomdata.IpV4Address()),
-					InstanceType:          input.LaunchTemplateConfigs[0].Overrides[0].InstanceType,
-					SpotInstanceRequestId: spotInstanceRequestID,
-					State: &ec2.InstanceState{
-						Name: &instanceState,
-					},
+				amiID := aws.String("")
+				if e.CalledWithCreateLaunchTemplateInput.Len() > 0 {
+					lt := e.CalledWithCreateLaunchTemplateInput.Pop()
+					amiID = lt.LaunchTemplateData.ImageId
+					e.CalledWithCreateLaunchTemplateInput.Add(lt)
 				}
-				e.Instances.Store(*instance.InstanceId, instance)
-				instanceIds = append(instanceIds, instance.InstanceId)
+				instanceState := ec2.InstanceStateNameRunning
+				for ; fulfilled < int(*input.TargetCapacitySpecification.TotalTargetCapacity); fulfilled++ {
+					instance := &ec2.Instance{
+						ImageId:               aws.String(*amiID),
+						InstanceId:            aws.String(test.RandomName()),
+						Placement:             &ec2.Placement{AvailabilityZone: input.LaunchTemplateConfigs[0].Overrides[0].AvailabilityZone},
+						PrivateDnsName:        aws.String(randomdata.IpV4Address()),
+						InstanceType:          input.LaunchTemplateConfigs[0].Overrides[0].InstanceType,
+						SpotInstanceRequestId: spotInstanceRequestID,
+						State: &ec2.InstanceState{
+							Name: &instanceState,
+						},
+					}
+					e.Instances.Store(*instance.InstanceId, instance)
+					instanceIds = append(instanceIds, instance.InstanceId)
+				}
+			}
+			if fulfilled == int(*input.TargetCapacitySpecification.TotalTargetCapacity) {
+				break
 			}
 		}
-	}
-
-	result := &ec2.CreateFleetOutput{Instances: []*ec2.CreateFleetInstance{{
-		InstanceIds:                instanceIds,
-		LaunchTemplateAndOverrides: &ec2.LaunchTemplateAndOverridesResponse{Overrides: &ec2.FleetLaunchTemplateOverrides{SubnetId: input.LaunchTemplateConfigs[0].Overrides[0].SubnetId}},
-	}}}
-	for _, pool := range skippedPools {
-		result.Errors = append(result.Errors, &ec2.CreateFleetError{
-			ErrorCode: aws.String("InsufficientInstanceCapacity"),
-			LaunchTemplateAndOverrides: &ec2.LaunchTemplateAndOverridesResponse{
-				LaunchTemplateSpecification: &ec2.FleetLaunchTemplateSpecification{
-					LaunchTemplateId:   input.LaunchTemplateConfigs[0].LaunchTemplateSpecification.LaunchTemplateId,
-					LaunchTemplateName: input.LaunchTemplateConfigs[0].LaunchTemplateSpecification.LaunchTemplateName,
-				},
-				Overrides: &ec2.FleetLaunchTemplateOverrides{
-					InstanceType:     aws.String(pool.InstanceType),
-					AvailabilityZone: aws.String(pool.Zone),
+		result := &ec2.CreateFleetOutput{Instances: []*ec2.CreateFleetInstance{
+			{
+				InstanceIds:  instanceIds,
+				InstanceType: input.LaunchTemplateConfigs[0].Overrides[0].InstanceType,
+				Lifecycle:    input.TargetCapacitySpecification.DefaultTargetCapacityType,
+				LaunchTemplateAndOverrides: &ec2.LaunchTemplateAndOverridesResponse{
+					Overrides: &ec2.FleetLaunchTemplateOverrides{
+						SubnetId:         input.LaunchTemplateConfigs[0].Overrides[0].SubnetId,
+						InstanceType:     input.LaunchTemplateConfigs[0].Overrides[0].InstanceType,
+						AvailabilityZone: input.LaunchTemplateConfigs[0].Overrides[0].AvailabilityZone,
+					},
 				},
 			},
-		})
-	}
-	return e.CreateFleetBehavior.WithDefault(result).Invoke(input)
+		}}
+		for _, pool := range skippedPools {
+			result.Errors = append(result.Errors, &ec2.CreateFleetError{
+				ErrorCode: aws.String("InsufficientInstanceCapacity"),
+				LaunchTemplateAndOverrides: &ec2.LaunchTemplateAndOverridesResponse{
+					Overrides: &ec2.FleetLaunchTemplateOverrides{
+						InstanceType:     aws.String(pool.InstanceType),
+						AvailabilityZone: aws.String(pool.Zone),
+					},
+				},
+			})
+		}
+		return result, nil
+	})
 }
 
 func (e *EC2API) TerminateInstancesWithContext(_ context.Context, input *ec2.TerminateInstancesInput, _ ...request.Option) (*ec2.TerminateInstancesOutput, error) {
-	if !e.TerminateInstancesBehavior.Error.IsNil() || !e.TerminateInstancesBehavior.Output.IsNil() {
-		return e.TerminateInstancesBehavior.Invoke(input)
-	}
-	var instanceStateChanges []*ec2.InstanceStateChange
-	for _, id := range input.InstanceIds {
-		instanceID := *id
-		if _, ok := e.Instances.LoadAndDelete(instanceID); ok {
-			instanceStateChanges = append(instanceStateChanges, &ec2.InstanceStateChange{
-				PreviousState: &ec2.InstanceState{Name: aws.String(ec2.InstanceStateNameRunning), Code: aws.Int64(16)},
-				CurrentState:  &ec2.InstanceState{Name: aws.String(ec2.InstanceStateNameShuttingDown), Code: aws.Int64(32)},
-				InstanceId:    aws.String(instanceID),
-			})
+	return e.TerminateInstancesBehavior.Invoke(input, func(input *ec2.TerminateInstancesInput) (*ec2.TerminateInstancesOutput, error) {
+		var instanceStateChanges []*ec2.InstanceStateChange
+		for _, id := range input.InstanceIds {
+			instanceID := *id
+			if _, ok := e.Instances.LoadAndDelete(instanceID); ok {
+				instanceStateChanges = append(instanceStateChanges, &ec2.InstanceStateChange{
+					PreviousState: &ec2.InstanceState{Name: aws.String(ec2.InstanceStateNameRunning), Code: aws.Int64(16)},
+					CurrentState:  &ec2.InstanceState{Name: aws.String(ec2.InstanceStateNameShuttingDown), Code: aws.Int64(32)},
+					InstanceId:    aws.String(instanceID),
+				})
+			}
 		}
-	}
-	result := &ec2.TerminateInstancesOutput{TerminatingInstances: instanceStateChanges}
-	return e.TerminateInstancesBehavior.WithDefault(result).Invoke(input)
+		return &ec2.TerminateInstancesOutput{TerminatingInstances: instanceStateChanges}, nil
+	})
 }
 
 func (e *EC2API) CreateLaunchTemplateWithContext(_ context.Context, input *ec2.CreateLaunchTemplateInput, _ ...request.Option) (*ec2.CreateLaunchTemplateOutput, error) {
@@ -213,46 +220,46 @@ func (e *EC2API) CreateLaunchTemplateWithContext(_ context.Context, input *ec2.C
 }
 
 func (e *EC2API) CreateTagsWithContext(_ context.Context, input *ec2.CreateTagsInput, _ ...request.Option) (*ec2.CreateTagsOutput, error) {
-	// Update passed in instances with the passed tags
-	for _, id := range input.Resources {
-		raw, ok := e.Instances.Load(aws.StringValue(id))
-		if !ok {
-			return nil, fmt.Errorf("instance with id '%s' does not exist", aws.StringValue(id))
-		}
-		instance := raw.(*ec2.Instance)
+	return e.CreateTagsBehavior.Invoke(input, func(input *ec2.CreateTagsInput) (*ec2.CreateTagsOutput, error) {
+		// Update passed in instances with the passed tags
+		for _, id := range input.Resources {
+			raw, ok := e.Instances.Load(aws.StringValue(id))
+			if !ok {
+				return nil, fmt.Errorf("instance with id '%s' does not exist", aws.StringValue(id))
+			}
+			instance := raw.(*ec2.Instance)
 
-		// Upsert any tags that have the same key
-		newTagKeys := sets.New[string](lo.Map(input.Tags, func(t *ec2.Tag, _ int) string { return aws.StringValue(t.Key) })...)
-		instance.Tags = lo.Filter(input.Tags, func(t *ec2.Tag, _ int) bool { return newTagKeys.Has(aws.StringValue(t.Key)) })
-		instance.Tags = append(instance.Tags, input.Tags...)
-	}
-	return e.CreateTagsBehavior.Invoke(input)
+			// Upsert any tags that have the same key
+			newTagKeys := sets.New(lo.Map(input.Tags, func(t *ec2.Tag, _ int) string { return aws.StringValue(t.Key) })...)
+			instance.Tags = lo.Filter(input.Tags, func(t *ec2.Tag, _ int) bool { return newTagKeys.Has(aws.StringValue(t.Key)) })
+			instance.Tags = append(instance.Tags, input.Tags...)
+		}
+		return nil, nil
+	})
 }
 
 func (e *EC2API) DescribeInstancesWithContext(_ context.Context, input *ec2.DescribeInstancesInput, _ ...request.Option) (*ec2.DescribeInstancesOutput, error) {
-	if !e.DescribeInstancesBehavior.Error.IsNil() || !e.DescribeInstancesBehavior.Output.IsNil() {
-		return e.DescribeInstancesBehavior.Invoke(input)
-	}
-	var instances []*ec2.Instance
+	return e.DescribeInstancesBehavior.Invoke(input, func(input *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		var instances []*ec2.Instance
 
-	// If it's a list call and no instance ids are specified
-	if len(aws.StringValueSlice(input.InstanceIds)) == 0 {
-		e.Instances.Range(func(k interface{}, v interface{}) bool {
-			instances = append(instances, v.(*ec2.Instance))
-			return true
-		})
-	}
-	for _, instanceID := range input.InstanceIds {
-		instance, _ := e.Instances.Load(*instanceID)
-		if instance == nil {
-			continue
+		// If it's a list call and no instance ids are specified
+		if len(aws.StringValueSlice(input.InstanceIds)) == 0 {
+			e.Instances.Range(func(k interface{}, v interface{}) bool {
+				instances = append(instances, v.(*ec2.Instance))
+				return true
+			})
 		}
-		instances = append(instances, instance.(*ec2.Instance))
-	}
-	result := &ec2.DescribeInstancesOutput{
-		Reservations: []*ec2.Reservation{{Instances: filterInstances(instances, input.Filters)}},
-	}
-	return e.DescribeInstancesBehavior.WithDefault(result).Invoke(input)
+		for _, instanceID := range input.InstanceIds {
+			instance, _ := e.Instances.Load(*instanceID)
+			if instance == nil {
+				continue
+			}
+			instances = append(instances, instance.(*ec2.Instance))
+		}
+		return &ec2.DescribeInstancesOutput{
+			Reservations: []*ec2.Reservation{{Instances: filterInstances(instances, input.Filters)}},
+		}, nil
+	})
 }
 
 func (e *EC2API) DescribeInstancesPagesWithContext(ctx context.Context, input *ec2.DescribeInstancesInput, fn func(*ec2.DescribeInstancesOutput, bool) bool, opts ...request.Option) error {
@@ -319,10 +326,15 @@ func (e *EC2API) DescribeImagesWithContext(_ context.Context, input *ec2.Describ
 	if !e.DescribeImagesOutput.IsNil() {
 		return e.DescribeImagesOutput.Clone(), nil
 	}
+	if aws.StringValue(input.Filters[0].Values[0]) == "invalid" {
+		return &ec2.DescribeImagesOutput{}, nil
+	}
 	return &ec2.DescribeImagesOutput{
 		Images: []*ec2.Image{
 			{
+				Name:         aws.String(test.RandomName()),
 				ImageId:      aws.String(test.RandomName()),
+				CreationDate: aws.String(time.Now().Format(time.UnixDate)),
 				Architecture: aws.String("x86_64"),
 			},
 		},
@@ -351,7 +363,7 @@ func (e *EC2API) DescribeLaunchTemplatesWithContext(_ context.Context, input *ec
 	return output, nil
 }
 
-func (e *EC2API) DescribeSubnetsWithContext(ctx context.Context, input *ec2.DescribeSubnetsInput, opts ...request.Option) (*ec2.DescribeSubnetsOutput, error) {
+func (e *EC2API) DescribeSubnetsWithContext(_ context.Context, input *ec2.DescribeSubnetsInput, _ ...request.Option) (*ec2.DescribeSubnetsOutput, error) {
 	if !e.NextError.IsNil() {
 		defer e.NextError.Reset()
 		return nil, e.NextError.Get()
@@ -366,6 +378,7 @@ func (e *EC2API) DescribeSubnetsWithContext(ctx context.Context, input *ec2.Desc
 			SubnetId:                aws.String("subnet-test1"),
 			AvailabilityZone:        aws.String("test-zone-1a"),
 			AvailableIpAddressCount: aws.Int64(100),
+			MapPublicIpOnLaunch:     aws.Bool(false),
 			Tags: []*ec2.Tag{
 				{Key: aws.String("Name"), Value: aws.String("test-subnet-1")},
 				{Key: aws.String("foo"), Value: aws.String("bar")},
@@ -375,6 +388,7 @@ func (e *EC2API) DescribeSubnetsWithContext(ctx context.Context, input *ec2.Desc
 			SubnetId:                aws.String("subnet-test2"),
 			AvailabilityZone:        aws.String("test-zone-1b"),
 			AvailableIpAddressCount: aws.Int64(100),
+			MapPublicIpOnLaunch:     aws.Bool(true),
 			Tags: []*ec2.Tag{
 				{Key: aws.String("Name"), Value: aws.String("test-subnet-2")},
 				{Key: aws.String("foo"), Value: aws.String("bar")},
@@ -397,7 +411,7 @@ func (e *EC2API) DescribeSubnetsWithContext(ctx context.Context, input *ec2.Desc
 	return &ec2.DescribeSubnetsOutput{Subnets: FilterDescribeSubnets(subnets, input.Filters)}, nil
 }
 
-func (e *EC2API) DescribeSecurityGroupsWithContext(ctx context.Context, input *ec2.DescribeSecurityGroupsInput, opts ...request.Option) (*ec2.DescribeSecurityGroupsOutput, error) {
+func (e *EC2API) DescribeSecurityGroupsWithContext(_ context.Context, input *ec2.DescribeSecurityGroupsInput, _ ...request.Option) (*ec2.DescribeSecurityGroupsOutput, error) {
 	if !e.NextError.IsNil() {
 		defer e.NextError.Reset()
 		return nil, e.NextError.Get()
@@ -409,21 +423,24 @@ func (e *EC2API) DescribeSecurityGroupsWithContext(ctx context.Context, input *e
 	}
 	sgs := []*ec2.SecurityGroup{
 		{
-			GroupId: aws.String("sg-test1"),
+			GroupId:   aws.String("sg-test1"),
+			GroupName: aws.String("securityGroup-test1"),
 			Tags: []*ec2.Tag{
 				{Key: aws.String("Name"), Value: aws.String("test-security-group-1")},
 				{Key: aws.String("foo"), Value: aws.String("bar")},
 			},
 		},
 		{
-			GroupId: aws.String("sg-test2"),
+			GroupId:   aws.String("sg-test2"),
+			GroupName: aws.String("securityGroup-test2"),
 			Tags: []*ec2.Tag{
 				{Key: aws.String("Name"), Value: aws.String("test-security-group-2")},
 				{Key: aws.String("foo"), Value: aws.String("bar")},
 			},
 		},
 		{
-			GroupId: aws.String("sg-test3"),
+			GroupId:   aws.String("sg-test3"),
+			GroupName: aws.String("securityGroup-test3"),
 			Tags: []*ec2.Tag{
 				{Key: aws.String("Name"), Value: aws.String("test-security-group-3")},
 				{Key: aws.String("TestTag")},
@@ -549,6 +566,10 @@ func (e *EC2API) DescribeInstanceTypeOfferingsPagesWithContext(_ context.Context
 				Location:     aws.String("test-zone-1a"),
 			},
 			{
+				InstanceType: aws.String("trn1.2xlarge"),
+				Location:     aws.String("test-zone-1a"),
+			},
+			{
 				InstanceType: aws.String("c6g.large"),
 				Location:     aws.String("test-zone-1a"),
 			},
@@ -569,7 +590,7 @@ func (e *EC2API) DescribeInstanceTypeOfferingsPagesWithContext(_ context.Context
 	return nil
 }
 
-func (e *EC2API) DescribeSpotPriceHistoryPagesWithContext(_ aws.Context, in *ec2.DescribeSpotPriceHistoryInput, fn func(*ec2.DescribeSpotPriceHistoryOutput, bool) bool, opts ...request.Option) error {
+func (e *EC2API) DescribeSpotPriceHistoryPagesWithContext(_ aws.Context, in *ec2.DescribeSpotPriceHistoryInput, fn func(*ec2.DescribeSpotPriceHistoryOutput, bool) bool, _ ...request.Option) error {
 	e.DescribeSpotPriceHistoryInput.Set(in)
 	if !e.NextError.IsNil() {
 		defer e.NextError.Reset()

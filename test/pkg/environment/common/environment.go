@@ -33,32 +33,40 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	coreapis "github.com/aws/karpenter-core/pkg/apis"
+	"github.com/aws/karpenter-core/pkg/apis/v1alpha5"
 	"github.com/aws/karpenter-core/pkg/operator/injection"
 	"github.com/aws/karpenter/pkg/apis"
 	"github.com/aws/karpenter/pkg/utils/project"
 )
 
+type ContextKey string
+
+const (
+	GitRefContextKey = ContextKey("gitRef")
+)
+
 type Environment struct {
 	context.Context
 
-	Client            client.Client
-	Config            *rest.Config
-	KubeClient        kubernetes.Interface
-	Monitor           *Monitor
-	StartingNodeCount int
+	Client     client.Client
+	Config     *rest.Config
+	KubeClient kubernetes.Interface
+	Monitor    *Monitor
 
-	cancel context.CancelFunc
+	StartingNodeCount int
 }
 
 func NewEnvironment(t *testing.T) *Environment {
 	ctx := loggingtesting.TestContextWithLogger(t)
-	ctx, cancel := context.WithCancel(ctx)
 	config := NewConfig()
 	client := lo.Must(NewClient(config))
 
-	os.Setenv(system.NamespaceEnvKey, "karpenter")
+	lo.Must0(os.Setenv(system.NamespaceEnvKey, "karpenter"))
 	kubernetesInterface := kubernetes.NewForConfigOrDie(config)
 	ctx = injection.WithSettingsOrDie(ctx, kubernetesInterface, apis.Settings...)
+	if val, ok := os.LookupEnv("GIT_REF"); ok {
+		ctx = context.WithValue(ctx, GitRefContextKey, val)
+	}
 
 	gomega.SetDefaultEventuallyTimeout(5 * time.Minute)
 	gomega.SetDefaultEventuallyPollingInterval(1 * time.Second)
@@ -68,18 +76,14 @@ func NewEnvironment(t *testing.T) *Environment {
 		Client:     client,
 		KubeClient: kubernetes.NewForConfigOrDie(config),
 		Monitor:    NewMonitor(ctx, client),
-
-		cancel: cancel,
 	}
-}
-
-func (env *Environment) Stop() {
-	env.cancel()
 }
 
 func NewConfig() *rest.Config {
 	config := controllerruntime.GetConfigOrDie()
-	config.UserAgent = fmt.Sprintf("testing.karpenter.sh-%s", project.Version)
+	config.UserAgent = fmt.Sprintf("%s-%s", v1alpha5.TestingGroup, project.Version)
+	config.QPS = 1e6
+	config.Burst = 1e6
 	return config
 }
 

@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/samber/lo"
+	"k8s.io/apimachinery/pkg/types"
 	. "knative.dev/pkg/logging/testing"
 
 	coresettings "github.com/aws/karpenter-core/pkg/apis/settings"
@@ -47,6 +48,7 @@ var stop context.CancelFunc
 var opts options.Options
 var env *coretest.Environment
 var awsEnv *test.Environment
+var controller *pricing.Controller
 
 func TestAWS(t *testing.T) {
 	ctx = TestContextWithLogger(t)
@@ -60,6 +62,7 @@ var _ = BeforeSuite(func() {
 	ctx = settings.ToContext(ctx, test.Settings())
 	ctx, stop = context.WithCancel(ctx)
 	awsEnv = test.NewEnvironment(ctx, env)
+	controller = pricing.NewController(awsEnv.PricingProvider)
 })
 
 var _ = AfterSuite(func() {
@@ -82,15 +85,15 @@ var _ = AfterEach(func() {
 var _ = Describe("Pricing", func() {
 	It("should return static on-demand data if pricing API fails", func() {
 		awsEnv.PricingAPI.NextError.Set(fmt.Errorf("failed"))
-		p := pricing.NewProvider(ctx, awsEnv.PricingAPI, awsEnv.EC2API, "", make(chan struct{}))
-		price, ok := p.OnDemandPrice("c5.large")
+		ExpectReconcileFailed(ctx, controller, types.NamespacedName{})
+		price, ok := awsEnv.PricingProvider.OnDemandPrice("c5.large")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically(">", 0))
 	})
 	It("should return static spot data if EC2 describeSpotPriceHistory API fails", func() {
 		awsEnv.PricingAPI.NextError.Set(fmt.Errorf("failed"))
-		p := pricing.NewProvider(ctx, awsEnv.PricingAPI, awsEnv.EC2API, "", make(chan struct{}))
-		price, ok := p.SpotPrice("c5.large", "test-zone-1a")
+		ExpectReconcileFailed(ctx, controller, types.NamespacedName{})
+		price, ok := awsEnv.PricingProvider.SpotPrice("c5.large", "test-zone-1a")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically(">", 0))
 	})
@@ -104,16 +107,18 @@ var _ = Describe("Pricing", func() {
 			},
 		})
 		updateStart := time.Now()
-		p := pricing.NewProvider(ctx, awsEnv.PricingAPI, awsEnv.EC2API, "", make(chan struct{}))
-		Eventually(func() bool { return p.OnDemandLastUpdated().After(updateStart) }).Should(BeTrue())
+		ExpectReconcileFailed(ctx, controller, types.NamespacedName{})
+		Eventually(func() bool { return awsEnv.PricingProvider.OnDemandLastUpdated().After(updateStart) }).Should(BeTrue())
 
-		price, ok := p.OnDemandPrice("c98.large")
+		price, ok := awsEnv.PricingProvider.OnDemandPrice("c98.large")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically("==", 1.20))
+		Expect(getPricingEstimateMetricValue("c98.large", ec2.UsageClassTypeOnDemand, "")).To(BeNumerically("==", 1.20))
 
-		price, ok = p.OnDemandPrice("c99.large")
+		price, ok = awsEnv.PricingProvider.OnDemandPrice("c99.large")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically("==", 1.23))
+		Expect(getPricingEstimateMetricValue("c99.large", ec2.UsageClassTypeOnDemand, "")).To(BeNumerically("==", 1.23))
 	})
 	It("should update spot pricing with response from the pricing API", func() {
 		now := time.Now()
@@ -152,16 +157,18 @@ var _ = Describe("Pricing", func() {
 			},
 		})
 		updateStart := time.Now()
-		p := pricing.NewProvider(ctx, awsEnv.PricingAPI, awsEnv.EC2API, "", make(chan struct{}))
-		Eventually(func() bool { return p.SpotLastUpdated().After(updateStart) }).Should(BeTrue())
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
+		Eventually(func() bool { return awsEnv.PricingProvider.SpotLastUpdated().After(updateStart) }).Should(BeTrue())
 
-		price, ok := p.SpotPrice("c98.large", "test-zone-1b")
+		price, ok := awsEnv.PricingProvider.SpotPrice("c98.large", "test-zone-1b")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically("==", 1.10))
+		Expect(getPricingEstimateMetricValue("c98.large", ec2.UsageClassTypeSpot, "test-zone-1b")).To(BeNumerically("==", 1.10))
 
-		price, ok = p.SpotPrice("c99.large", "test-zone-1a")
+		price, ok = awsEnv.PricingProvider.SpotPrice("c99.large", "test-zone-1a")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically("==", 1.23))
+		Expect(getPricingEstimateMetricValue("c99.large", ec2.UsageClassTypeSpot, "test-zone-1a")).To(BeNumerically("==", 1.23))
 	})
 	It("should update zonal pricing with data from the spot pricing API", func() {
 		now := time.Now()
@@ -188,14 +195,15 @@ var _ = Describe("Pricing", func() {
 			},
 		})
 		updateStart := time.Now()
-		p := pricing.NewProvider(ctx, awsEnv.PricingAPI, awsEnv.EC2API, "", make(chan struct{}))
-		Eventually(func() bool { return p.SpotLastUpdated().After(updateStart) }).Should(BeTrue())
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
+		Eventually(func() bool { return awsEnv.PricingProvider.SpotLastUpdated().After(updateStart) }).Should(BeTrue())
 
-		price, ok := p.SpotPrice("c98.large", "test-zone-1a")
+		price, ok := awsEnv.PricingProvider.SpotPrice("c98.large", "test-zone-1a")
 		Expect(ok).To(BeTrue())
 		Expect(price).To(BeNumerically("==", 1.20))
+		Expect(getPricingEstimateMetricValue("c98.large", ec2.UsageClassTypeSpot, "test-zone-1a")).To(BeNumerically("==", 1.20))
 
-		_, ok = p.SpotPrice("c98.large", "test-zone-1b")
+		_, ok = awsEnv.PricingProvider.SpotPrice("c98.large", "test-zone-1b")
 		Expect(ok).ToNot(BeTrue())
 	})
 	It("should respond with false if price doesn't exist in zone", func() {
@@ -217,10 +225,10 @@ var _ = Describe("Pricing", func() {
 			},
 		})
 		updateStart := time.Now()
-		p := pricing.NewProvider(ctx, awsEnv.PricingAPI, awsEnv.EC2API, "", make(chan struct{}))
-		Eventually(func() bool { return p.SpotLastUpdated().After(updateStart) }).Should(BeTrue())
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
+		Eventually(func() bool { return awsEnv.PricingProvider.SpotLastUpdated().After(updateStart) }).Should(BeTrue())
 
-		_, ok := p.SpotPrice("c99.large", "test-zone-1b")
+		_, ok := awsEnv.PricingProvider.SpotPrice("c99.large", "test-zone-1b")
 		Expect(ok).To(BeFalse())
 	})
 	It("should query for both `Linux/UNIX` and `Linux/UNIX (Amazon VPC)`", func() {
@@ -245,10 +253,24 @@ var _ = Describe("Pricing", func() {
 				fake.NewOnDemandPrice("c99.large", 1.23),
 			},
 		})
-		p := pricing.NewProvider(ctx, awsEnv.PricingAPI, awsEnv.EC2API, "", make(chan struct{}))
-		Eventually(func() bool { return p.SpotLastUpdated().After(updateStart) }, 5*time.Second).Should(BeTrue())
+		ExpectReconcileSucceeded(ctx, controller, types.NamespacedName{})
+		Eventually(func() bool { return awsEnv.PricingProvider.SpotLastUpdated().After(updateStart) }, 5*time.Second).Should(BeTrue())
 		inp := awsEnv.EC2API.DescribeSpotPriceHistoryInput.Clone()
 		Expect(lo.Map(inp.ProductDescriptions, func(x *string, _ int) string { return *x })).
 			To(ContainElements("Linux/UNIX", "Linux/UNIX (Amazon VPC)"))
 	})
 })
+
+func getPricingEstimateMetricValue(instanceType string, capacityType string, zone string) float64 {
+	var value *float64
+	metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_price_estimate", map[string]string{
+		pricing.InstanceTypeLabel: instanceType,
+		pricing.CapacityTypeLabel: capacityType,
+		pricing.RegionLabel:       "",
+		pricing.TopologyLabel:     zone,
+	})
+	Expect(ok).To(BeTrue())
+	value = metric.GetGauge().Value
+	Expect(value).To(Not(BeNil()))
+	return *value
+}

@@ -41,6 +41,7 @@ import (
 
 const (
 	MemoryAvailable = "memory.available"
+	NodeFSAvailable = "nodefs.available"
 )
 
 var (
@@ -57,9 +58,9 @@ func NewInstanceType(ctx context.Context, info *ec2.InstanceTypeInfo, kc *v1alph
 		Offerings:    offerings,
 		Capacity:     computeCapacity(ctx, info, amiFamily, nodeTemplate.Spec.BlockDeviceMappings, kc),
 		Overhead: &cloudprovider.InstanceTypeOverhead{
-			KubeReserved:      kubeReservedResources(cpu(info), pods(ctx, info, amiFamily, kc), eniLimitedPods(info), amiFamily, kc),
+			KubeReserved:      kubeReservedResources(cpu(info), pods(ctx, info, amiFamily, kc), ENILimitedPods(ctx, info), amiFamily, kc),
 			SystemReserved:    systemReservedResources(kc),
-			EvictionThreshold: evictionThreshold(memory(ctx, info), amiFamily, kc),
+			EvictionThreshold: evictionThreshold(memory(ctx, info), ephemeralStorage(amiFamily, nodeTemplate.Spec.BlockDeviceMappings), amiFamily, kc),
 		},
 	}
 }
@@ -70,9 +71,10 @@ func computeRequirements(ctx context.Context, info *ec2.InstanceTypeInfo, offeri
 		// Well Known Upstream
 		scheduling.NewRequirement(v1.LabelInstanceTypeStable, v1.NodeSelectorOpIn, aws.StringValue(info.InstanceType)),
 		scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, getArchitecture(info)),
-		scheduling.NewRequirement(v1.LabelOSStable, v1.NodeSelectorOpIn, string(v1.Linux)),
+		scheduling.NewRequirement(v1.LabelOSStable, v1.NodeSelectorOpIn, getOS(info, amiFamily)...),
 		scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, lo.Map(offerings.Available(), func(o cloudprovider.Offering, _ int) string { return o.Zone })...),
 		scheduling.NewRequirement(v1.LabelTopologyRegion, v1.NodeSelectorOpIn, region),
+		scheduling.NewRequirement(v1.LabelWindowsBuild, v1.NodeSelectorOpDoesNotExist),
 		// Well Known to Karpenter
 		scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, lo.Map(offerings.Available(), func(o cloudprovider.Offering, _ int) string { return o.CapacityType })...),
 		// Well Known to AWS
@@ -89,6 +91,9 @@ func computeRequirements(ctx context.Context, info *ec2.InstanceTypeInfo, offeri
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUManufacturer, v1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, v1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUMemory, v1.NodeSelectorOpDoesNotExist),
+		scheduling.NewRequirement(v1alpha1.LabelInstanceAcceleratorName, v1.NodeSelectorOpDoesNotExist),
+		scheduling.NewRequirement(v1alpha1.LabelInstanceAcceleratorManufacturer, v1.NodeSelectorOpDoesNotExist),
+		scheduling.NewRequirement(v1alpha1.LabelInstanceAcceleratorCount, v1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceHypervisor, v1.NodeSelectorOpIn, aws.StringValue(info.Hypervisor)),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceEncryptionInTransitSupported, v1.NodeSelectorOpIn, fmt.Sprint(aws.BoolValue(info.NetworkInfo.EncryptionInTransitSupported))),
 	)
@@ -118,7 +123,40 @@ func computeRequirements(ctx context.Context, info *ec2.InstanceTypeInfo, offeri
 		requirements.Get(v1alpha1.LabelInstanceGPUCount).Insert(fmt.Sprint(aws.Int64Value(gpu.Count)))
 		requirements.Get(v1alpha1.LabelInstanceGPUMemory).Insert(fmt.Sprint(aws.Int64Value(gpu.MemoryInfo.SizeInMiB)))
 	}
+	// Accelerators
+	if info.InferenceAcceleratorInfo != nil && len(info.InferenceAcceleratorInfo.Accelerators) == 1 {
+		accelerator := info.InferenceAcceleratorInfo.Accelerators[0]
+		requirements.Get(v1alpha1.LabelInstanceAcceleratorName).Insert(lowerKabobCase(aws.StringValue(accelerator.Name)))
+		requirements.Get(v1alpha1.LabelInstanceAcceleratorManufacturer).Insert(lowerKabobCase(aws.StringValue(accelerator.Manufacturer)))
+		requirements.Get(v1alpha1.LabelInstanceAcceleratorCount).Insert(fmt.Sprint(aws.Int64Value(accelerator.Count)))
+	}
+	// Windows Build Version Labels
+	if family, ok := amiFamily.(*amifamily.Windows); ok {
+		requirements.Get(v1.LabelWindowsBuild).Insert(family.Build)
+	}
+	return hardcodeNeuron(requirements, info)
+}
+
+// TODO: remove function once DescribeInstanceTypes contains the accelerator data
+// Values found from: https://aws.amazon.com/ec2/instance-types/trn1/
+func hardcodeNeuron(requirements scheduling.Requirements, info *ec2.InstanceTypeInfo) scheduling.Requirements {
+	// Trn1 Accelerators
+	if strings.HasPrefix(*info.InstanceType, "trn1") {
+		requirements.Get(v1alpha1.LabelInstanceAcceleratorName).Insert(lowerKabobCase("Inferentia"))
+		requirements.Get(v1alpha1.LabelInstanceAcceleratorManufacturer).Insert(lowerKabobCase("AWS"))
+		requirements.Get(v1alpha1.LabelInstanceAcceleratorCount).Insert(fmt.Sprint(awsNeurons(info)))
+	}
 	return requirements
+}
+
+func getOS(info *ec2.InstanceTypeInfo, amiFamily amifamily.AMIFamily) []string {
+	if _, ok := amiFamily.(*amifamily.Windows); ok {
+		if getArchitecture(info) == v1alpha5.ArchitectureAmd64 {
+			return []string{string(v1.Windows)}
+		}
+		return []string{}
+	}
+	return []string{string(v1.Linux)}
 }
 
 func getArchitecture(info *ec2.InstanceTypeInfo) string {
@@ -133,7 +171,7 @@ func getArchitecture(info *ec2.InstanceTypeInfo) string {
 func computeCapacity(ctx context.Context, info *ec2.InstanceTypeInfo, amiFamily amifamily.AMIFamily,
 	blockDeviceMappings []*v1alpha1.BlockDeviceMapping, kc *v1alpha5.KubeletConfiguration) v1.ResourceList {
 
-	return v1.ResourceList{
+	resourceList := v1.ResourceList{
 		v1.ResourceCPU:               *cpu(info),
 		v1.ResourceMemory:            *memory(ctx, info),
 		v1.ResourceEphemeralStorage:  *ephemeralStorage(amiFamily, blockDeviceMappings),
@@ -144,6 +182,11 @@ func computeCapacity(ctx context.Context, info *ec2.InstanceTypeInfo, amiFamily 
 		v1alpha1.ResourceAWSNeuron:   *awsNeurons(info),
 		v1alpha1.ResourceHabanaGaudi: *habanaGaudis(info),
 	}
+	if _, ok := amiFamily.(*amifamily.Windows); ok {
+		//ResourcePrivateIPv4Address is the same as ENILimitedPods on Windows node
+		resourceList[v1alpha1.ResourcePrivateIPv4Address] = *privateIPv4Address(info)
+	}
+	return resourceList
 }
 
 func cpu(info *ec2.InstanceTypeInfo) *resource.Quantity {
@@ -151,7 +194,12 @@ func cpu(info *ec2.InstanceTypeInfo) *resource.Quantity {
 }
 
 func memory(ctx context.Context, info *ec2.InstanceTypeInfo) *resource.Quantity {
-	mem := resources.Quantity(fmt.Sprintf("%dMi", *info.MemoryInfo.SizeInMiB))
+	sizeInMib := *info.MemoryInfo.SizeInMiB
+	// Gravitons have an extra 64 MiB of cma reserved memory that we can't use
+	if len(info.ProcessorInfo.SupportedArchitectures) > 0 && *info.ProcessorInfo.SupportedArchitectures[0] == "arm64" {
+		sizeInMib -= 64
+	}
+	mem := resources.Quantity(fmt.Sprintf("%dMi", sizeInMib))
 	// Account for VM overhead in calculation
 	mem.Sub(resource.MustParse(fmt.Sprintf("%dMi", int64(math.Ceil(float64(mem.Value())*awssettings.FromContext(ctx).VMMemoryOverheadPercent/1024/1024)))))
 	return mem
@@ -162,16 +210,23 @@ func ephemeralStorage(amiFamily amifamily.AMIFamily, blockDeviceMappings []*v1al
 	if len(blockDeviceMappings) != 0 {
 		switch amiFamily.(type) {
 		case *amifamily.Custom:
-			return blockDeviceMappings[len(blockDeviceMappings)-1].EBS.VolumeSize
+			// We can't know if a custom AMI is going to have a volume size.
+			volumeSize := blockDeviceMappings[len(blockDeviceMappings)-1].EBS.VolumeSize
+			return lo.Ternary(volumeSize != nil, volumeSize, amifamily.DefaultEBS.VolumeSize)
 		default:
-			ephemeralBlockDevice := amiFamily.EphemeralBlockDevice()
-			for _, blockDevice := range blockDeviceMappings {
-				// If a block device mapping exists in the provider for the root volume, set the volume size specified in the provider
-				if *blockDevice.DeviceName == *ephemeralBlockDevice {
-					return blockDevice.EBS.VolumeSize
-				}
+			// If a block device mapping exists in the provider for the root volume, use the volume size specified in the provider. If not, use the default
+			if blockDeviceMapping, ok := lo.Find(blockDeviceMappings, func(bdm *v1alpha1.BlockDeviceMapping) bool {
+				return *bdm.DeviceName == *amiFamily.EphemeralBlockDevice()
+			}); ok && blockDeviceMapping.EBS.VolumeSize != nil {
+				return blockDeviceMapping.EBS.VolumeSize
 			}
 		}
+	}
+	//Return the ephemeralBlockDevice size if defined in ami
+	if ephemeralBlockDevice, ok := lo.Find(amiFamily.DefaultBlockDeviceMappings(), func(item *v1alpha1.BlockDeviceMapping) bool {
+		return *amiFamily.EphemeralBlockDevice() == *item.DeviceName
+	}); ok {
+		return ephemeralBlockDevice.EBS.VolumeSize
 	}
 	return amifamily.DefaultEBS.VolumeSize
 }
@@ -209,9 +264,17 @@ func amdGPUs(info *ec2.InstanceTypeInfo) *resource.Quantity {
 	return resources.Quantity(fmt.Sprint(count))
 }
 
+// TODO: remove trn1 hardcode values once DescribeInstanceTypes contains the accelerator data
+// Values found from: https://aws.amazon.com/ec2/instance-types/trn1/
 func awsNeurons(info *ec2.InstanceTypeInfo) *resource.Quantity {
 	count := int64(0)
-	if info.InferenceAcceleratorInfo != nil {
+	if *info.InstanceType == "trn1.2xlarge" {
+		count = int64(1)
+	} else if *info.InstanceType == "trn1.32xlarge" {
+		count = int64(16)
+	} else if *info.InstanceType == "trn1n.32xlarge" {
+		count = int64(16)
+	} else if info.InferenceAcceleratorInfo != nil {
 		for _, accelerator := range info.InferenceAcceleratorInfo.Accelerators {
 			count += *accelerator.Count
 		}
@@ -231,24 +294,34 @@ func habanaGaudis(info *ec2.InstanceTypeInfo) *resource.Quantity {
 	return resources.Quantity(fmt.Sprint(count))
 }
 
-// The number of pods per node is calculated using the formula:
-// max number of ENIs * (IPv4 Addresses per ENI -1) + 2
-// https://github.com/awslabs/amazon-eks-ami/blob/master/files/eni-max-pods.txt#L20
-func eniLimitedPods(info *ec2.InstanceTypeInfo) *resource.Quantity {
-	return resources.Quantity(fmt.Sprint(*info.NetworkInfo.MaximumNetworkInterfaces*(*info.NetworkInfo.Ipv4AddressesPerInterface-1) + 2))
+func ENILimitedPods(ctx context.Context, info *ec2.InstanceTypeInfo) *resource.Quantity {
+	// The number of pods per node is calculated using the formula:
+	// max number of ENIs * (IPv4 Addresses per ENI -1) + 2
+	// https://github.com/awslabs/amazon-eks-ami/blob/master/files/eni-max-pods.txt#L20
+
+	// VPC CNI only uses the default network interface
+	// https://github.com/aws/amazon-vpc-cni-k8s/blob/3294231c0dce52cfe473bf6c62f47956a3b333b6/scripts/gen_vpc_ip_limits.go#L162
+	networkInterfaces := *info.NetworkInfo.NetworkCards[*info.NetworkInfo.DefaultNetworkCardIndex].MaximumNetworkInterfaces
+	usableNetworkInterfaces := lo.Max([]int64{(networkInterfaces - int64(awssettings.FromContext(ctx).ReservedENIs)), 0})
+	if usableNetworkInterfaces == 0 {
+		return resource.NewQuantity(0, resource.DecimalSI)
+	}
+	addressesPerInterface := *info.NetworkInfo.Ipv4AddressesPerInterface
+	return resources.Quantity(fmt.Sprint(usableNetworkInterfaces*(addressesPerInterface-1) + 2))
+}
+
+func privateIPv4Address(info *ec2.InstanceTypeInfo) *resource.Quantity {
+
+	//https://github.com/aws/amazon-vpc-resource-controller-k8s/blob/ecbd6965a0100d9a070110233762593b16023287/pkg/provider/ip/provider.go#L297
+	capacity := aws.Int64Value(info.NetworkInfo.Ipv4AddressesPerInterface) - 1
+	return resources.Quantity(fmt.Sprint(capacity))
 }
 
 func systemReservedResources(kc *v1alpha5.KubeletConfiguration) v1.ResourceList {
-	// default system-reserved resources: https://kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/#system-reserved
-	resources := v1.ResourceList{
-		v1.ResourceCPU:              resource.MustParse("100m"),
-		v1.ResourceMemory:           resource.MustParse("100Mi"),
-		v1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
-	}
 	if kc != nil && kc.SystemReserved != nil {
-		return lo.Assign(resources, kc.SystemReserved)
+		return kc.SystemReserved
 	}
-	return resources
+	return v1.ResourceList{}
 }
 
 func kubeReservedResources(cpus, pods, eniLimitedPods *resource.Quantity, amiFamily amifamily.AMIFamily, kc *v1alpha5.KubeletConfiguration) v1.ResourceList {
@@ -287,9 +360,10 @@ func kubeReservedResources(cpus, pods, eniLimitedPods *resource.Quantity, amiFam
 	return resources
 }
 
-func evictionThreshold(memory *resource.Quantity, amiFamily amifamily.AMIFamily, kc *v1alpha5.KubeletConfiguration) v1.ResourceList {
+func evictionThreshold(memory *resource.Quantity, storage *resource.Quantity, amiFamily amifamily.AMIFamily, kc *v1alpha5.KubeletConfiguration) v1.ResourceList {
 	overhead := v1.ResourceList{
-		v1.ResourceMemory: resource.MustParse("100Mi"),
+		v1.ResourceMemory:           resource.MustParse("100Mi"),
+		v1.ResourceEphemeralStorage: resource.MustParse(fmt.Sprint(math.Ceil(float64(storage.Value()) / 100 * 10))),
 	}
 	if kc == nil {
 		return overhead
@@ -307,15 +381,10 @@ func evictionThreshold(memory *resource.Quantity, amiFamily amifamily.AMIFamily,
 	for _, m := range evictionSignals {
 		temp := v1.ResourceList{}
 		if v, ok := m[MemoryAvailable]; ok {
-			if strings.HasSuffix(v, "%") {
-				p := mustParsePercentage(v)
-
-				// Calculation is node.capacity * evictionHard[memory.available] if percentage
-				// From https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/#eviction-signals
-				temp[v1.ResourceMemory] = resource.MustParse(fmt.Sprint(math.Ceil(float64(memory.Value()) / 100 * p)))
-			} else {
-				temp[v1.ResourceMemory] = resource.MustParse(v)
-			}
+			temp[v1.ResourceMemory] = computeEvictionSignal(*memory, v)
+		}
+		if v, ok := m[NodeFSAvailable]; ok {
+			temp[v1.ResourceEphemeralStorage] = computeEvictionSignal(*storage, v)
 		}
 		override = resources.MaxResources(override, temp)
 	}
@@ -328,10 +397,11 @@ func pods(ctx context.Context, info *ec2.InstanceTypeInfo, amiFamily amifamily.A
 	switch {
 	case kc != nil && kc.MaxPods != nil:
 		count = int64(ptr.Int32Value(kc.MaxPods))
-	case !awssettings.FromContext(ctx).EnableENILimitedPodDensity:
-		count = 110
+	case awssettings.FromContext(ctx).EnableENILimitedPodDensity && amiFamily.FeatureFlags().SupportsENILimitedPodDensity:
+		count = ENILimitedPods(ctx, info).Value()
 	default:
-		count = eniLimitedPods(info).Value()
+		count = 110
+
 	}
 	if kc != nil && ptr.Int32Value(kc.PodsPerCore) > 0 && amiFamily.FeatureFlags().PodsPerCoreEnabled {
 		count = lo.Min([]int64{int64(ptr.Int32Value(kc.PodsPerCore)) * ptr.Int64Value(info.VCpuInfo.DefaultVCpus), count})
@@ -341,6 +411,19 @@ func pods(ctx context.Context, info *ec2.InstanceTypeInfo, amiFamily amifamily.A
 
 func lowerKabobCase(s string) string {
 	return strings.ToLower(strings.ReplaceAll(s, " ", "-"))
+}
+
+// computeEvictionSignal computes the resource quantity value for an eviction signal value, computed off the
+// base capacity value if the signal value is a percentage or as a resource quantity if the signal value isn't a percentage
+func computeEvictionSignal(capacity resource.Quantity, signalValue string) resource.Quantity {
+	if strings.HasSuffix(signalValue, "%") {
+		p := mustParsePercentage(signalValue)
+
+		// Calculation is node.capacity * signalValue if percentage
+		// From https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/#eviction-signals
+		return resource.MustParse(fmt.Sprint(math.Ceil(capacity.AsApproximateFloat64() / 100 * p)))
+	}
+	return resource.MustParse(signalValue)
 }
 
 func mustParsePercentage(v string) float64 {

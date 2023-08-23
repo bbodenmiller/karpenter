@@ -40,7 +40,7 @@ type metricInfo struct {
 }
 
 func (i metricInfo) qualifiedName() string {
-	return fmt.Sprintf("%s_%s_%s", i.namespace, i.subsystem, i.name)
+	return strings.Join(lo.Compact([]string{i.namespace, i.subsystem, i.name}), "_")
 }
 
 // metrics_gen_docs is used to parse the source code for Prometheus metrics and automatically generate markdown documentation
@@ -76,14 +76,20 @@ description: >
 `)
 	fmt.Fprintf(f, "<!-- this document is generated from hack/docs/metrics_gen_docs.go -->\n")
 	fmt.Fprintf(f, "Karpenter makes several metrics available in Prometheus format to allow monitoring cluster provisioning status. "+
-		"These metrics are available by default at `karpenter.karpenter.svc.cluster.local:8080/metrics` configurable via the `METRICS_PORT` environment variable documented [here](../settings)\n")
+		"These metrics are available by default at `karpenter.karpenter.svc.cluster.local:8000/metrics` configurable via the `METRICS_PORT` environment variable documented [here](../settings)\n")
 	previousSubsystem := ""
 
-	// TODO @joinnis: Remove this line when exposing machine metrics
+	// Ignore nodeClaimSubsystem metrics until NodeClaims are released
 	allMetrics = lo.Reject(allMetrics, func(m metricInfo, _ int) bool {
-		return m.subsystem == "machines" || strings.HasPrefix(m.name, "controller_runtime")
+		return m.subsystem == "nodeclaims"
 	})
 	for _, metric := range allMetrics {
+		// Controller Runtime naming is different in that they don't specify a namespace or subsystem
+		// Getting the metrics requires special parsing logic
+		if metric.subsystem == "" && strings.HasPrefix(metric.name, "controller_runtime_") {
+			metric.subsystem = "controller_runtime"
+			metric.name = strings.TrimPrefix(metric.name, "controller_runtime_")
+		}
 		if metric.subsystem != previousSubsystem {
 			subsystemTitle := strings.Join(lo.Map(strings.Split(metric.subsystem, "_"), func(s string, _ int) string {
 				return fmt.Sprintf("%s%s", strings.ToTitle(s[0:1]), s[1:])
@@ -158,7 +164,7 @@ func bySubsystem(metrics []metricInfo) func(i int, j int) bool {
 	subSystemSortOrder["nodes"] = 2
 	subSystemSortOrder["pods"] = 3
 	subSystemSortOrder["cloudprovider"] = 4
-	subSystemSortOrder["allocation_controller"] = 5
+	subSystemSortOrder["cloudprovider_batcher"] = 5
 	return func(i, j int) bool {
 		lhs := metrics[i]
 		rhs := metrics[j]
@@ -263,9 +269,13 @@ func getIdentMapping(identName string) (string, error) {
 
 		"nodeSubsystem":           "nodes",
 		"machineSubsystem":        "machines",
+		"nodeClaimSubsystem":      "nodeclaims",
 		"interruptionSubsystem":   "interruption",
 		"nodeTemplateSubsystem":   "nodetemplate",
 		"deprovisioningSubsystem": "deprovisioning",
+		"consistencySubsystem":    "consistency",
+		"batcherSubsystem":        "cloudprovider_batcher",
+		"cloudProviderSubsystem":  "cloudprovider",
 	}
 	if v, ok := identMapping[identName]; ok {
 		return v, nil

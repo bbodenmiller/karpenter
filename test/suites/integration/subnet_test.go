@@ -48,7 +48,7 @@ var _ = Describe("Subnets", func() {
 				SubnetSelector:        map[string]string{"aws-ids": firstSubnet},
 			},
 		})
-		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name}})
+		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name}})
 		pod := test.Pod()
 
 		env.ExpectCreated(pod, provider, provisioner)
@@ -74,7 +74,7 @@ var _ = Describe("Subnets", func() {
 				SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 			},
 		})
-		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name}})
+		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name}})
 		pod := test.Pod()
 
 		env.ExpectCreated(pod, provider, provisioner)
@@ -96,7 +96,7 @@ var _ = Describe("Subnets", func() {
 				SubnetSelector:        map[string]string{"Name": fmt.Sprintf("%s,%s", firstSubnet.Name, lastSubnet.Name)},
 			},
 		})
-		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name}})
+		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name}})
 		pod := test.Pod()
 
 		env.ExpectCreated(pod, provider, provisioner)
@@ -118,7 +118,7 @@ var _ = Describe("Subnets", func() {
 			},
 		})
 		provisioner := test.Provisioner(test.ProvisionerOptions{
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 			Requirements: []v1.NodeSelectorRequirement{
 				{
 					Key:      v1.LabelZoneFailureDomainStable,
@@ -208,7 +208,7 @@ func EventuallyExpectSubnets(provider *v1alpha1.AWSNodeTemplate) {
 		if err := env.Client.Get(env, client.ObjectKeyFromObject(provider), &ant); err != nil {
 			return
 		}
-		subnetIDsInStatus := lo.Map(ant.Status.Subnets, func(subnet v1alpha1.SubnetStatus, _ int) string {
+		subnetIDsInStatus := lo.Map(ant.Status.Subnets, func(subnet v1alpha1.Subnet, _ int) string {
 			return subnet.ID
 		})
 

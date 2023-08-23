@@ -22,7 +22,7 @@ There are two main configuration mechanisms that can be used to configure Karpen
 | KUBE_CLIENT_QPS | \-\-kube-client-qps | The smoothed rate of qps to kube-apiserver (default = 200)|
 | LEADER_ELECT | \-\-leader-elect | Start leader election client and gain leadership before executing the main loop. Enable this when running replicated components for high availability. (default = true)|
 | MEMORY_LIMIT | \-\-memory-limit | Memory limit on the container running the controller. The GC soft memory limit is set to 90% of this value. (default = -1)|
-| METRICS_PORT | \-\-metrics-port | The port the metric endpoint binds to for operating metrics about the controller itself (default = 8080)|
+| METRICS_PORT | \-\-metrics-port | The port the metric endpoint binds to for operating metrics about the controller itself (default = 8000)|
 | WEBHOOK_PORT | \-\-webhook-port | The port the webhook endpoint binds to for validation and mutation of resources (default = 8443)|
 
 [comment]: <> (end docs generated content from hack/docs/configuration_gen_docs.go)
@@ -41,10 +41,16 @@ data:
   # The maximum length of a batch window. The longer this is, the more pods we can consider for provisioning at one
   # time which usually results in fewer but larger nodes.
   batchMaxDuration: 10s
-  # The maximum amount of time with no new ending pods that if exceeded ends the current batching window. If pods arrive
+  # The maximum amount of time with no new pending pods that if exceeded ends the current batching window. If pods arrive
   # faster than this time, the batching window will be extended up to the maxDuration. If they arrive slower, the pods
   # will be batched separately.
   batchIdleDuration: 1s
+  # Role to assume for calling AWS services.
+  aws.assumeRoleARN: arn:aws:iam::111222333444:role/examplerole
+  # Duration of assumed credentials in minutes. Default value is 15 minutes. Not used unless aws.assumeRole set.
+  aws.assumeRoleDuration: 15m
+  # Cluster CA bundle for nodes to use for TLS connections with the API server. If not set, this is taken from the controller's TLS configuration.
+  aws.clusterCABundle: "LS0tLS1..."
   # [REQUIRED] The kubernetes cluster name for resource discovery
   aws.clusterName: karpenter-cluster
   # [REQUIRED] The external kubernetes cluster endpoint for new nodes to connect with
@@ -58,8 +64,6 @@ data:
   # If true, then assume we can't reach AWS services which don't have a VPC endpoint
   # This also has the effect of disabling look-ups to the AWS pricing endpoint
   aws.isolatedVPC: "false"
-  # The node naming convention (either "ip-name" or "resource-name"; use "ip-name" for resource DNS names such as i-0123456789.ec2.internal and "resource-name" when using the external cloud provider)
-  aws.nodeNameConvention: ip-name
   # The VM memory overhead as a percent that will be subtracted
   # from the total memory for all instance types
   aws.vmMemoryOverheadPercent: "0.075"
@@ -68,6 +72,9 @@ data:
   aws.interruptionQueueName: karpenter-cluster
   # Global tags are specified by including a JSON object of string to string from tag key to tag value
   aws.tags: '{"custom-tag1-key": "custom-tag-value", "custom-tag2-key": "custom-tag-value"}'
+  # Reserved ENIs are not included in the calculations for max-pods or kube-reserved
+  # This is most often used in the VPC CNI custom networking setup https://docs.aws.amazon.com/eks/latest/userguide/cni-custom-network.html
+  aws.reservedENIs: "1"
 ```
 
 ### Feature Gates

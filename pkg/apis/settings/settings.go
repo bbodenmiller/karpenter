@@ -19,18 +19,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"go.uber.org/multierr"
 	v1 "k8s.io/api/core/v1"
+	"knative.dev/pkg/apis"
 	"knative.dev/pkg/configmap"
-)
 
-type NodeNameConvention string
-
-const (
-	IPName       NodeNameConvention = "ip-name"
-	ResourceName NodeNameConvention = "resource-name"
+	"github.com/aws/karpenter/pkg/apis/v1alpha1"
 )
 
 type settingsKeyType struct{}
@@ -38,30 +35,36 @@ type settingsKeyType struct{}
 var ContextKey = settingsKeyType{}
 
 var defaultSettings = &Settings{
+	AssumeRoleARN:              "",
+	AssumeRoleDuration:         time.Minute * 15,
+	ClusterCABundle:            "",
 	ClusterName:                "",
 	ClusterEndpoint:            "",
 	DefaultInstanceProfile:     "",
 	EnablePodENI:               false,
 	EnableENILimitedPodDensity: true,
 	IsolatedVPC:                false,
-	NodeNameConvention:         IPName,
 	VMMemoryOverheadPercent:    0.075,
 	InterruptionQueueName:      "",
 	Tags:                       map[string]string{},
+	ReservedENIs:               0,
 }
 
 // +k8s:deepcopy-gen=true
 type Settings struct {
+	AssumeRoleARN              string
+	AssumeRoleDuration         time.Duration `validate:"min=15m"`
+	ClusterCABundle            string
 	ClusterName                string `validate:"required"`
 	ClusterEndpoint            string
 	DefaultInstanceProfile     string
 	EnablePodENI               bool
 	EnableENILimitedPodDensity bool
 	IsolatedVPC                bool
-	NodeNameConvention         NodeNameConvention `validate:"required"`
-	VMMemoryOverheadPercent    float64            `validate:"min=0"`
+	VMMemoryOverheadPercent    float64 `validate:"min=0"`
 	InterruptionQueueName      string
 	Tags                       map[string]string
+	ReservedENIs               int `validate:"min=0"`
 }
 
 func (*Settings) ConfigMap() string {
@@ -73,16 +76,19 @@ func (*Settings) Inject(ctx context.Context, cm *v1.ConfigMap) (context.Context,
 	s := defaultSettings.DeepCopy()
 
 	if err := configmap.Parse(cm.Data,
+		configmap.AsString("aws.assumeRoleARN", &s.AssumeRoleARN),
+		configmap.AsDuration("aws.assumeRoleDuration", &s.AssumeRoleDuration),
+		configmap.AsString("aws.clusterCABundle", &s.ClusterCABundle),
 		configmap.AsString("aws.clusterName", &s.ClusterName),
 		configmap.AsString("aws.clusterEndpoint", &s.ClusterEndpoint),
 		configmap.AsString("aws.defaultInstanceProfile", &s.DefaultInstanceProfile),
 		configmap.AsBool("aws.enablePodENI", &s.EnablePodENI),
 		configmap.AsBool("aws.enableENILimitedPodDensity", &s.EnableENILimitedPodDensity),
 		configmap.AsBool("aws.isolatedVPC", &s.IsolatedVPC),
-		AsTypedString("aws.nodeNameConvention", &s.NodeNameConvention),
 		configmap.AsFloat64("aws.vmMemoryOverheadPercent", &s.VMMemoryOverheadPercent),
 		configmap.AsString("aws.interruptionQueueName", &s.InterruptionQueueName),
 		AsStringMap("aws.tags", &s.Tags),
+		configmap.AsInt("aws.reservedENIs", &s.ReservedENIs),
 	); err != nil {
 		return ctx, fmt.Errorf("parsing settings, %w", err)
 	}
@@ -101,6 +107,7 @@ func (*Settings) Inject(ctx context.Context, cm *v1.ConfigMap) (context.Context,
 func (s Settings) Validate() error {
 	return multierr.Combine(
 		s.validateEndpoint(),
+		s.validateTags(),
 		validator.New().Struct(s),
 	)
 }
@@ -116,6 +123,17 @@ func (s Settings) validateEndpoint() error {
 		return fmt.Errorf("\"%s\" not a valid clusterEndpoint URL", s.ClusterEndpoint)
 	}
 	return nil
+}
+
+func (s Settings) validateTags() (err error) {
+	for k := range s.Tags {
+		for _, pattern := range v1alpha1.RestrictedTagPatterns {
+			if pattern.MatchString(k) {
+				err = multierr.Append(err, apis.ErrInvalidKeyName(k, "tags", fmt.Sprintf("tag contains a restricted tag %q", pattern.String())))
+			}
+		}
+	}
+	return err
 }
 
 func ToContext(ctx context.Context, s *Settings) context.Context {

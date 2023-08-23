@@ -129,7 +129,7 @@ var _ = Describe("Provisioner", func() {
 		})
 		It("should succeed if provider undefined", func() {
 			provisioner.Spec.Provider = nil
-			provisioner.Spec.ProviderRef = &v1alpha5.ProviderRef{
+			provisioner.Spec.ProviderRef = &v1alpha5.MachineTemplateRef{
 				Kind: "AWSNodeTemplate",
 				Name: "default",
 			}
@@ -187,6 +187,9 @@ var _ = Describe("Provisioner", func() {
 					v1alpha1.LabelInstanceGPUManufacturer,
 					v1alpha1.LabelInstanceGPUCount,
 					v1alpha1.LabelInstanceGPUMemory,
+					v1alpha1.LabelInstanceAcceleratorName,
+					v1alpha1.LabelInstanceAcceleratorManufacturer,
+					v1alpha1.LabelInstanceAcceleratorCount,
 				} {
 					provisioner.Spec.Labels = map[string]string{label: randomdata.SillyName()}
 					Expect(provisioner.Validate(ctx)).To(Succeed())

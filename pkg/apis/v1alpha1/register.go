@@ -15,6 +15,9 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"fmt"
+	"regexp"
+
 	"github.com/aws/aws-sdk-go/service/ec2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,29 +38,55 @@ var (
 		"x86_64":                   v1alpha5.ArchitectureAmd64,
 		v1alpha5.ArchitectureArm64: v1alpha5.ArchitectureArm64,
 	}
+	WellKnownArchitectures = sets.NewString(
+		v1alpha5.ArchitectureAmd64,
+		v1alpha5.ArchitectureArm64,
+	)
 	RestrictedLabelDomains = []string{
 		LabelDomain,
+	}
+	RestrictedTagPatterns = []*regexp.Regexp{
+		// Adheres to cluster name pattern matching as specified in the API spec
+		// https://docs.aws.amazon.com/eks/latest/APIReference/API_CreateCluster.html
+		regexp.MustCompile(`^kubernetes\.io/cluster/[0-9A-Za-z][A-Za-z0-9\-_]*$`),
+		regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(v1alpha5.ProvisionerNameLabelKey))),
+		regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(v1alpha5.MachineManagedByAnnotationKey))),
 	}
 	AMIFamilyBottlerocket = "Bottlerocket"
 	AMIFamilyAL2          = "AL2"
 	AMIFamilyUbuntu       = "Ubuntu"
+	AMIFamilyWindows2019  = "Windows2019"
+	AMIFamilyWindows2022  = "Windows2022"
 	AMIFamilyCustom       = "Custom"
 	SupportedAMIFamilies  = []string{
 		AMIFamilyBottlerocket,
 		AMIFamilyAL2,
 		AMIFamilyUbuntu,
+		AMIFamilyWindows2019,
+		AMIFamilyWindows2022,
 		AMIFamilyCustom,
 	}
-	SupportedContainerRuntimesByAMIFamily = map[string]sets.String{
-		AMIFamilyBottlerocket: sets.NewString("containerd"),
-		AMIFamilyAL2:          sets.NewString("dockerd", "containerd"),
-		AMIFamilyUbuntu:       sets.NewString("dockerd", "containerd"),
+	SupportedContainerRuntimesByAMIFamily = map[string]sets.Set[string]{
+		AMIFamilyBottlerocket: sets.New("containerd"),
+		AMIFamilyAL2:          sets.New("dockerd", "containerd"),
+		AMIFamilyUbuntu:       sets.New("dockerd", "containerd"),
+		AMIFamilyWindows2019:  sets.New("dockerd", "containerd"),
+		AMIFamilyWindows2022:  sets.New("dockerd", "containerd"),
 	}
-	ResourceNVIDIAGPU   v1.ResourceName = "nvidia.com/gpu"
-	ResourceAMDGPU      v1.ResourceName = "amd.com/gpu"
-	ResourceAWSNeuron   v1.ResourceName = "aws.amazon.com/neuron"
-	ResourceHabanaGaudi v1.ResourceName = "habana.ai/gaudi"
-	ResourceAWSPodENI   v1.ResourceName = "vpc.amazonaws.com/pod-eni"
+
+	Windows2019                                           = "2019"
+	Windows2022                                           = "2022"
+	WindowsCore                                           = "Core"
+	Windows2019Build                                      = "10.0.17763"
+	Windows2022Build                                      = "10.0.20348"
+	ResourceNVIDIAGPU             v1.ResourceName         = "nvidia.com/gpu"
+	ResourceAMDGPU                v1.ResourceName         = "amd.com/gpu"
+	ResourceAWSNeuron             v1.ResourceName         = "aws.amazon.com/neuron"
+	ResourceHabanaGaudi           v1.ResourceName         = "habana.ai/gaudi"
+	ResourceAWSPodENI             v1.ResourceName         = "vpc.amazonaws.com/pod-eni"
+	ResourcePrivateIPv4Address    v1.ResourceName         = "vpc.amazonaws.com/PrivateIPv4Address"
+	NVIDIAacceleratorManufacturer AcceleratorManufacturer = "nvidia"
+	AWSAcceleratorManufacturer    AcceleratorManufacturer = "aws"
 
 	LabelInstanceHypervisor                   = LabelDomain + "/instance-hypervisor"
 	LabelInstanceEncryptionInTransitSupported = LabelDomain + "/instance-encryption-in-transit-supported"
@@ -75,8 +104,10 @@ var (
 	LabelInstanceGPUCount                     = LabelDomain + "/instance-gpu-count"
 	LabelInstanceGPUMemory                    = LabelDomain + "/instance-gpu-memory"
 	LabelInstanceAMIID                        = LabelDomain + "/instance-ami-id"
-
-	InterruptionInfrastructureFinalizer = Group + "/interruption-infrastructure"
+	LabelInstanceAcceleratorName              = LabelDomain + "/instance-accelerator-name"
+	LabelInstanceAcceleratorManufacturer      = LabelDomain + "/instance-accelerator-manufacturer"
+	LabelInstanceAcceleratorCount             = LabelDomain + "/instance-accelerator-count"
+	AnnotationNodeTemplateHash                = LabelDomain + "/nodetemplate-hash"
 )
 
 var (
@@ -113,5 +144,11 @@ func init() {
 		LabelInstanceGPUManufacturer,
 		LabelInstanceGPUCount,
 		LabelInstanceGPUMemory,
+		LabelInstanceAcceleratorName,
+		LabelInstanceAcceleratorManufacturer,
+		LabelInstanceAcceleratorCount,
+		v1.LabelWindowsBuild,
 	)
 }
+
+type AcceleratorManufacturer string

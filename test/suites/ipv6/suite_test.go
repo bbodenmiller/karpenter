@@ -38,15 +38,11 @@ func TestIPv6(t *testing.T) {
 	BeforeSuite(func() {
 		env = aws.NewEnvironment(t)
 	})
-	AfterSuite(func() {
-		env.Stop()
-	})
 	RunSpecs(t, "IPv6")
 }
 
 var _ = BeforeEach(func() { env.BeforeEach() })
 var _ = AfterEach(func() { env.Cleanup() })
-var _ = AfterEach(func() { env.ForceCleanup() })
 var _ = AfterEach(func() { env.AfterEach() })
 
 var _ = Describe("IPv6", func() {
@@ -56,7 +52,7 @@ var _ = Describe("IPv6", func() {
 				SecurityGroupSelector: map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 				SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 			}})
-		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name}, Requirements: []v1.NodeSelectorRequirement{
+		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name}, Requirements: []v1.NodeSelectorRequirement{
 			{
 				Key:      v1.LabelInstanceTypeStable,
 				Operator: v1.NodeSelectorOpIn,
@@ -86,7 +82,7 @@ var _ = Describe("IPv6", func() {
 				SecurityGroupSelector: map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 				SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 			}})
-		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name}, Requirements: []v1.NodeSelectorRequirement{
+		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name}, Requirements: []v1.NodeSelectorRequirement{
 			{
 				Key:      v1.LabelInstanceTypeStable,
 				Operator: v1.NodeSelectorOpIn,

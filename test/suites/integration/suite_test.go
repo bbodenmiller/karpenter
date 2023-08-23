@@ -30,13 +30,9 @@ func TestIntegration(t *testing.T) {
 	BeforeSuite(func() {
 		env = aws.NewEnvironment(t)
 	})
-	AfterSuite(func() {
-		env.Stop()
-	})
 	RunSpecs(t, "Integration")
 }
 
 var _ = BeforeEach(func() { env.BeforeEach() })
 var _ = AfterEach(func() { env.Cleanup() })
-var _ = AfterEach(func() { env.ForceCleanup() })
 var _ = AfterEach(func() { env.AfterEach() })

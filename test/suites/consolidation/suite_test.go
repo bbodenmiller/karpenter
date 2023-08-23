@@ -30,6 +30,7 @@ import (
 	"github.com/aws/karpenter-core/pkg/test"
 	"github.com/aws/karpenter/pkg/apis/settings"
 	"github.com/aws/karpenter/pkg/apis/v1alpha1"
+	"github.com/aws/karpenter/test/pkg/debug"
 
 	awstest "github.com/aws/karpenter/pkg/test"
 	environmentaws "github.com/aws/karpenter/test/pkg/environment/aws"
@@ -46,19 +47,15 @@ func TestConsolidation(t *testing.T) {
 	BeforeSuite(func() {
 		env = environmentaws.NewEnvironment(t)
 	})
-	AfterSuite(func() {
-		env.Stop()
-	})
 	RunSpecs(t, "Consolidation")
 }
 
 var _ = BeforeEach(func() { env.BeforeEach() })
 var _ = AfterEach(func() { env.Cleanup() })
-var _ = AfterEach(func() { env.ForceCleanup() })
 var _ = AfterEach(func() { env.AfterEach() })
 
 var _ = Describe("Consolidation", func() {
-	It("should consolidate nodes (delete)", Label(common.NoWatch), Label(common.NoEvents), func() {
+	It("should consolidate nodes (delete)", Label(debug.NoWatch), Label(debug.NoEvents), func() {
 		provider := awstest.AWSNodeTemplate(v1alpha1.AWSNodeTemplateSpec{AWS: v1alpha1.AWS{
 			SecurityGroupSelector: map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 			SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
@@ -86,7 +83,7 @@ var _ = Describe("Consolidation", func() {
 			},
 			// prevent emptiness from deleting the nodes
 			TTLSecondsAfterEmpty: aws.Int64(99999),
-			ProviderRef:          &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef:          &v1alpha5.MachineTemplateRef{Name: provider.Name},
 		})
 
 		var numPods int32 = 100
@@ -142,7 +139,7 @@ var _ = Describe("Consolidation", func() {
 					Values:   []string{"large", "2xlarge"},
 				},
 			},
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 		})
 
 		var numPods int32 = 3
@@ -258,7 +255,7 @@ var _ = Describe("Consolidation", func() {
 					Values:   []string{"large"},
 				},
 			},
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 		})
 
 		var numPods int32 = 2

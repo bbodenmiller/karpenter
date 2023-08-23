@@ -44,6 +44,7 @@ type BottlerocketSettings struct {
 // BottlerocketKubernetes is k8s specific configuration for bottlerocket api
 type BottlerocketKubernetes struct {
 	APIServer                   *string                          `toml:"api-server"`
+	CloudProvider               *string                          `toml:"cloud-provider"`
 	ClusterCertificate          *string                          `toml:"cluster-certificate"`
 	ClusterName                 *string                          `toml:"cluster-name"`
 	ClusterDNSIP                *string                          `toml:"cluster-dns-ip,omitempty"`
@@ -67,8 +68,9 @@ type BottlerocketKubernetes struct {
 	CPUManagerPolicy            *string                          `toml:"cpu-manager-policy,omitempty"`
 	CPUManagerReconcilePeriod   *string                          `toml:"cpu-manager-reconcile-period,omitempty"`
 	TopologyManagerScope        *string                          `toml:"topology-manager-scope,omitempty"`
-	ImageGCLowThresholdPercent  *int32                           `toml:"image-gc-high-threshold-percent,omitempty"`
-	ImageGCHighThresholdPercent *int32                           `toml:"image-gc-low-threshold-percent,omitempty"`
+	ImageGCHighThresholdPercent *string                          `toml:"image-gc-high-threshold-percent,omitempty"`
+	ImageGCLowThresholdPercent  *string                          `toml:"image-gc-low-threshold-percent,omitempty"`
+	CPUCFSQuota                 *bool                            `toml:"cpu-cfs-quota-enforced,omitempty"`
 }
 
 type BottlerocketStaticPod struct {

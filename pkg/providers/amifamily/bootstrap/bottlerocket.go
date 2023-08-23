@@ -17,8 +17,12 @@ package bootstrap
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 
 	"knative.dev/pkg/ptr"
+
+	"github.com/imdario/mergo"
+	"github.com/samber/lo"
 
 	"github.com/aws/karpenter-core/pkg/utils/resources"
 
@@ -29,6 +33,7 @@ type Bottlerocket struct {
 	Options
 }
 
+// nolint:gocyclo
 func (b Bottlerocket) Script() (string, error) {
 	s, err := NewBottlerocketConfig(b.CustomUserData)
 	if err != nil {
@@ -39,7 +44,9 @@ func (b Bottlerocket) Script() (string, error) {
 	s.Settings.Kubernetes.ClusterName = &b.ClusterName
 	s.Settings.Kubernetes.APIServer = &b.ClusterEndpoint
 	s.Settings.Kubernetes.ClusterCertificate = b.CABundle
-	s.Settings.Kubernetes.NodeLabels = b.Labels
+	if err := mergo.MergeWithOverwrite(&s.Settings.Kubernetes.NodeLabels, b.Labels); err != nil {
+		return "", err
+	}
 
 	// Backwards compatibility for AWSENILimitedPodDensity flag
 	if b.KubeletConfig != nil && b.KubeletConfig.MaxPods != nil {
@@ -48,15 +55,28 @@ func (b Bottlerocket) Script() (string, error) {
 		s.Settings.Kubernetes.MaxPods = aws.Int(110)
 	}
 
-	if b.KubeletConfig != nil && len(b.KubeletConfig.ClusterDNS) > 0 {
-		s.Settings.Kubernetes.ClusterDNSIP = &b.KubeletConfig.ClusterDNS[0]
-	}
 	if b.KubeletConfig != nil {
-		s.Settings.Kubernetes.SystemReserved = resources.StringMap(b.KubeletConfig.SystemReserved)
-		s.Settings.Kubernetes.KubeReserved = resources.StringMap(b.KubeletConfig.KubeReserved)
-		s.Settings.Kubernetes.EvictionHard = b.KubeletConfig.EvictionHard
-		s.Settings.Kubernetes.ImageGCLowThresholdPercent = b.KubeletConfig.ImageGCLowThresholdPercent
-		s.Settings.Kubernetes.ImageGCHighThresholdPercent = b.KubeletConfig.ImageGCHighThresholdPercent
+		if len(b.KubeletConfig.ClusterDNS) > 0 {
+			s.Settings.Kubernetes.ClusterDNSIP = &b.KubeletConfig.ClusterDNS[0]
+		}
+		if b.KubeletConfig.SystemReserved != nil {
+			s.Settings.Kubernetes.SystemReserved = resources.StringMap(b.KubeletConfig.SystemReserved)
+		}
+		if b.KubeletConfig.KubeReserved != nil {
+			s.Settings.Kubernetes.KubeReserved = resources.StringMap(b.KubeletConfig.KubeReserved)
+		}
+		if b.KubeletConfig.EvictionHard != nil {
+			s.Settings.Kubernetes.EvictionHard = b.KubeletConfig.EvictionHard
+		}
+		if b.KubeletConfig.ImageGCHighThresholdPercent != nil {
+			s.Settings.Kubernetes.ImageGCHighThresholdPercent = lo.ToPtr(strconv.FormatInt(int64(*b.KubeletConfig.ImageGCHighThresholdPercent), 10))
+		}
+		if b.KubeletConfig.ImageGCLowThresholdPercent != nil {
+			s.Settings.Kubernetes.ImageGCLowThresholdPercent = lo.ToPtr(strconv.FormatInt(int64(*b.KubeletConfig.ImageGCLowThresholdPercent), 10))
+		}
+		if b.KubeletConfig.CPUCFSQuota != nil {
+			s.Settings.Kubernetes.CPUCFSQuota = b.KubeletConfig.CPUCFSQuota
+		}
 	}
 
 	s.Settings.Kubernetes.NodeTaints = map[string][]string{}

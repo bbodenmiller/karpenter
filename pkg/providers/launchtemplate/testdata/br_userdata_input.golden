@@ -1,6 +1,7 @@
 [settings.kubernetes]
 "unknown-setting" = "unknown"
 api-server = 'replaceme'
+cloud-provider = 'external'
 cluster-certificate = "replaceme"
 cluster-name = 'replaceme'
 max-pods = 9999999999 # replaceme
@@ -10,6 +11,11 @@ max-pods = 9999999999 # replaceme
 
 [settings.kubernetes.labels]
 "replace" = "me"
+
+[settings.kubernetes.node-labels]
+"custom-node-label" = "custom"
+"karpenter.sh/provisioner-name" = "should-be-overridden"
+
 [settings.kubernetes.node-taints]
 "replace" = ["me:Schedule"]
 

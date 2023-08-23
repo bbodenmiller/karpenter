@@ -33,11 +33,13 @@ import (
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/ptr"
 
-	awssettings "github.com/aws/karpenter/pkg/apis/settings"
+	"github.com/aws/karpenter/pkg/apis/settings"
 	"github.com/aws/karpenter/pkg/apis/v1alpha1"
 	awserrors "github.com/aws/karpenter/pkg/errors"
 	"github.com/aws/karpenter/pkg/providers/amifamily"
 	"github.com/aws/karpenter/pkg/providers/securitygroup"
+	"github.com/aws/karpenter/pkg/providers/subnet"
+	"github.com/aws/karpenter/pkg/utils"
 
 	"github.com/aws/karpenter-core/pkg/apis/v1alpha5"
 
@@ -46,7 +48,7 @@ import (
 )
 
 const (
-	launchTemplateNameFormat = "Karpenter-%s-%s"
+	launchTemplateNameFormat = "karpenter.k8s.aws/%s"
 	karpenterManagedTagKey   = "karpenter.k8s.aws/cluster"
 )
 
@@ -55,6 +57,7 @@ type Provider struct {
 	ec2api                ec2iface.EC2API
 	amiFamily             *amifamily.Resolver
 	securityGroupProvider *securitygroup.Provider
+	subnetProvider        *subnet.Provider
 	cache                 *cache.Cache
 	caBundle              *string
 	cm                    *pretty.ChangeMonitor
@@ -62,11 +65,12 @@ type Provider struct {
 	ClusterEndpoint       string
 }
 
-func NewProvider(ctx context.Context, cache *cache.Cache, ec2api ec2iface.EC2API, amiFamily *amifamily.Resolver, securityGroupProvider *securitygroup.Provider, caBundle *string, startAsync <-chan struct{}, kubeDNSIP net.IP, clusterEndpoint string) *Provider {
+func NewProvider(ctx context.Context, cache *cache.Cache, ec2api ec2iface.EC2API, amiFamily *amifamily.Resolver, securityGroupProvider *securitygroup.Provider, subnetProvider *subnet.Provider, caBundle *string, startAsync <-chan struct{}, kubeDNSIP net.IP, clusterEndpoint string) *Provider {
 	l := &Provider{
 		ec2api:                ec2api,
 		amiFamily:             amiFamily,
 		securityGroupProvider: securityGroupProvider,
+		subnetProvider:        subnetProvider,
 		cache:                 cache,
 		caBundle:              caBundle,
 		cm:                    pretty.NewChangeMonitor(),
@@ -87,7 +91,7 @@ func NewProvider(ctx context.Context, cache *cache.Cache, ec2api ec2iface.EC2API
 }
 
 func (p *Provider) EnsureAll(ctx context.Context, nodeTemplate *v1alpha1.AWSNodeTemplate, machine *v1alpha5.Machine,
-	instanceTypes []*cloudprovider.InstanceType, additionalLabels map[string]string) (map[string][]*cloudprovider.InstanceType, error) {
+	instanceTypes []*cloudprovider.InstanceType, additionalLabels map[string]string, tags map[string]string) (map[string][]*cloudprovider.InstanceType, error) {
 
 	p.Lock()
 	defer p.Unlock()
@@ -95,7 +99,7 @@ func (p *Provider) EnsureAll(ctx context.Context, nodeTemplate *v1alpha1.AWSNode
 	if nodeTemplate.Spec.LaunchTemplateName != nil {
 		return map[string][]*cloudprovider.InstanceType{ptr.StringValue(nodeTemplate.Spec.LaunchTemplateName): instanceTypes}, nil
 	}
-	options, err := p.createAmiOptions(ctx, nodeTemplate, lo.Assign(machine.Labels, additionalLabels))
+	options, err := p.createAMIOptions(ctx, nodeTemplate, lo.Assign(machine.Labels, additionalLabels), tags)
 	if err != nil {
 		return nil, err
 	}
@@ -127,37 +131,49 @@ func (p *Provider) Invalidate(ctx context.Context, ltName string, ltID string) {
 }
 
 func launchTemplateName(options *amifamily.LaunchTemplate) string {
-	hash, err := hashstructure.Hash(options, hashstructure.FormatV2, nil)
+	hash, err := hashstructure.Hash(options, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
 	if err != nil {
 		panic(fmt.Sprintf("hashing launch template, %s", err))
 	}
-	return fmt.Sprintf(launchTemplateNameFormat, options.ClusterName, fmt.Sprint(hash))
+	return fmt.Sprintf(launchTemplateNameFormat, fmt.Sprint(hash))
 }
 
-func (p *Provider) createAmiOptions(ctx context.Context, nodeTemplate *v1alpha1.AWSNodeTemplate, labels map[string]string) (*amifamily.Options, error) {
+func (p *Provider) createAMIOptions(ctx context.Context, nodeTemplate *v1alpha1.AWSNodeTemplate, labels, tags map[string]string) (*amifamily.Options, error) {
 	instanceProfile, err := p.getInstanceProfile(ctx, nodeTemplate)
 	if err != nil {
 		return nil, err
 	}
 	// Get constrained security groups
-	securityGroupsIDs, err := p.securityGroupProvider.List(ctx, nodeTemplate)
+	securityGroups, err := p.securityGroupProvider.List(ctx, nodeTemplate)
 	if err != nil {
 		return nil, err
 	}
-	if len(securityGroupsIDs) == 0 {
+	if len(securityGroups) == 0 {
 		return nil, fmt.Errorf("no security groups exist given constraints")
 	}
-	return &amifamily.Options{
-		ClusterName:             awssettings.FromContext(ctx).ClusterName,
+	options := &amifamily.Options{
+		ClusterName:             settings.FromContext(ctx).ClusterName,
 		ClusterEndpoint:         p.ClusterEndpoint,
-		AWSENILimitedPodDensity: awssettings.FromContext(ctx).EnableENILimitedPodDensity,
+		AWSENILimitedPodDensity: settings.FromContext(ctx).EnableENILimitedPodDensity,
 		InstanceProfile:         instanceProfile,
-		SecurityGroupsIDs:       securityGroupsIDs,
-		Tags:                    lo.Assign(awssettings.FromContext(ctx).Tags, nodeTemplate.Spec.Tags),
-		Labels:                  labels,
-		CABundle:                p.caBundle,
-		KubeDNSIP:               p.KubeDNSIP,
-	}, nil
+		SecurityGroups: lo.Map(securityGroups, func(s *ec2.SecurityGroup, _ int) v1alpha1.SecurityGroup {
+			return v1alpha1.SecurityGroup{ID: aws.StringValue(s.GroupId), Name: aws.StringValue(s.GroupName)}
+		}),
+		Tags:      tags,
+		Labels:    labels,
+		CABundle:  p.caBundle,
+		KubeDNSIP: p.KubeDNSIP,
+	}
+	if ok, err := p.subnetProvider.CheckAnyPublicIPAssociations(ctx, nodeTemplate); err != nil {
+		return nil, err
+	} else if !ok {
+		// If all referenced subnets do not assign public IPv4 addresses to EC2 instances therein, we explicitly set
+		// AssociatePublicIpAddress to 'false' in the Launch Template, generated based on this configuration struct.
+		// This is done to help comply with AWS account policies that require explicitly setting of that field to 'false'.
+		// https://github.com/aws/karpenter/issues/3815
+		options.AssociatePublicIPAddress = aws.Bool(false)
+	}
+	return options, nil
 }
 
 func (p *Provider) ensureLaunchTemplate(ctx context.Context, options *amifamily.LaunchTemplate) (*ec2.LaunchTemplate, error) {
@@ -198,6 +214,7 @@ func (p *Provider) createLaunchTemplate(ctx context.Context, options *amifamily.
 	if err != nil {
 		return nil, err
 	}
+	networkInterface := p.generateNetworkInterface(options)
 	output, err := p.ec2api.CreateLaunchTemplateWithContext(ctx, &ec2.CreateLaunchTemplateInput{
 		LaunchTemplateName: aws.String(launchTemplateName(options)),
 		LaunchTemplateData: &ec2.RequestLaunchTemplateData{
@@ -208,7 +225,8 @@ func (p *Provider) createLaunchTemplate(ctx context.Context, options *amifamily.
 			Monitoring: &ec2.LaunchTemplatesMonitoringRequest{
 				Enabled: aws.Bool(options.DetailedMonitoring),
 			},
-			SecurityGroupIds: aws.StringSlice(options.SecurityGroupsIDs),
+			// If the network interface is defined, the security groups are defined within it
+			SecurityGroupIds: lo.Ternary(networkInterface != nil, nil, lo.Map(options.SecurityGroups, func(s v1alpha1.SecurityGroup, _ int) *string { return aws.String(s.ID) })),
 			UserData:         aws.String(userData),
 			ImageId:          aws.String(options.AMIID),
 			MetadataOptions: &ec2.LaunchTemplateInstanceMetadataOptionsRequest{
@@ -217,22 +235,41 @@ func (p *Provider) createLaunchTemplate(ctx context.Context, options *amifamily.
 				HttpPutResponseHopLimit: options.MetadataOptions.HTTPPutResponseHopLimit,
 				HttpTokens:              options.MetadataOptions.HTTPTokens,
 			},
+			NetworkInterfaces: networkInterface,
 			TagSpecifications: []*ec2.LaunchTemplateTagSpecificationRequest{
-				{ResourceType: aws.String(ec2.ResourceTypeNetworkInterface), Tags: v1alpha1.MergeTags(ctx, options.Tags)},
+				{ResourceType: aws.String(ec2.ResourceTypeNetworkInterface), Tags: utils.MergeTags(options.Tags)},
 			},
 		},
 		TagSpecifications: []*ec2.TagSpecification{
 			{
 				ResourceType: aws.String(ec2.ResourceTypeLaunchTemplate),
-				Tags:         v1alpha1.MergeTags(ctx, options.Tags, map[string]string{karpenterManagedTagKey: options.ClusterName}),
+				Tags:         utils.MergeTags(options.Tags, map[string]string{karpenterManagedTagKey: options.ClusterName}),
 			},
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	logging.FromContext(ctx).With("launch-template-id", aws.StringValue(output.LaunchTemplate.LaunchTemplateId)).Debugf("created launch template")
+	logging.FromContext(ctx).With("id", aws.StringValue(output.LaunchTemplate.LaunchTemplateId)).Debugf("created launch template")
 	return output.LaunchTemplate, nil
+}
+
+// generateNetworkInterface generates a network interface for the launch template.
+// If all referenced subnets do not assign public IPv4 addresses to EC2 instances therein, we explicitly set
+// AssociatePublicIpAddress to 'false' in the Launch Template, generated based on this configuration struct.
+// This is done to help comply with AWS account policies that require explicitly setting that field to 'false'.
+// https://github.com/aws/karpenter/issues/3815
+func (p *Provider) generateNetworkInterface(options *amifamily.LaunchTemplate) []*ec2.LaunchTemplateInstanceNetworkInterfaceSpecificationRequest {
+	if options.AssociatePublicIPAddress != nil {
+		return []*ec2.LaunchTemplateInstanceNetworkInterfaceSpecificationRequest{
+			{
+				AssociatePublicIpAddress: options.AssociatePublicIPAddress,
+				DeviceIndex:              aws.Int64(0),
+				Groups:                   lo.Map(options.SecurityGroups, func(s v1alpha1.SecurityGroup, _ int) *string { return aws.String(s.ID) }),
+			},
+		}
+	}
+	return nil
 }
 
 func (p *Provider) blockDeviceMappings(blockDeviceMappings []*v1alpha1.BlockDeviceMapping) []*ec2.LaunchTemplateBlockDeviceMappingRequest {
@@ -271,9 +308,8 @@ func (p *Provider) volumeSize(quantity *resource.Quantity) *int64 {
 // hydrateCache queries for existing Launch Templates created by Karpenter for the current cluster and adds to the LT cache.
 // Any error during hydration will result in a panic
 func (p *Provider) hydrateCache(ctx context.Context) {
-	clusterName := awssettings.FromContext(ctx).ClusterName
+	clusterName := settings.FromContext(ctx).ClusterName
 	ctx = logging.WithLogger(ctx, logging.FromContext(ctx).With("tag-key", karpenterManagedTagKey, "tag-value", clusterName))
-	logging.FromContext(ctx).Debugf("hydrating the launch template cache")
 	if err := p.ec2api.DescribeLaunchTemplatesPagesWithContext(ctx, &ec2.DescribeLaunchTemplatesInput{
 		Filters: []*ec2.Filter{{Name: aws.String(fmt.Sprintf("tag:%s", karpenterManagedTagKey)), Values: []*string{aws.String(clusterName)}}},
 	}, func(output *ec2.DescribeLaunchTemplatesOutput, _ bool) bool {
@@ -283,8 +319,9 @@ func (p *Provider) hydrateCache(ctx context.Context) {
 		return true
 	}); err != nil {
 		logging.FromContext(ctx).Errorf(fmt.Sprintf("Unable to hydrate the AWS launch template cache, %s", err))
+	} else {
+		logging.FromContext(ctx).With("count", p.cache.ItemCount()).Debugf("hydrated launch template cache")
 	}
-	logging.FromContext(ctx).With("item-count", p.cache.ItemCount()).Debugf("finished hydrating the launch template cache")
 }
 
 func (p *Provider) cachedEvictedFunc(ctx context.Context) func(string, interface{}) {
@@ -296,10 +333,13 @@ func (p *Provider) cachedEvictedFunc(ctx context.Context) func(string, interface
 		}
 		launchTemplate := lt.(*ec2.LaunchTemplate)
 		if _, err := p.ec2api.DeleteLaunchTemplate(&ec2.DeleteLaunchTemplateInput{LaunchTemplateId: launchTemplate.LaunchTemplateId}); err != nil {
-			logging.FromContext(ctx).Errorf("Unable to delete launch template, %v", err)
+			logging.FromContext(ctx).With("launch-template", launchTemplate.LaunchTemplateName).Errorf("failed to delete launch template, %v", err)
 			return
 		}
-		logging.FromContext(ctx).Debugf("deleted launch template")
+		logging.FromContext(ctx).With(
+			"id", aws.StringValue(launchTemplate.LaunchTemplateId),
+			"name", aws.StringValue(launchTemplate.LaunchTemplateName),
+		).Debugf("deleted launch template")
 	}
 }
 
@@ -307,7 +347,7 @@ func (p *Provider) getInstanceProfile(ctx context.Context, nodeTemplate *v1alpha
 	if nodeTemplate.Spec.InstanceProfile != nil {
 		return aws.StringValue(nodeTemplate.Spec.InstanceProfile), nil
 	}
-	defaultProfile := awssettings.FromContext(ctx).DefaultInstanceProfile
+	defaultProfile := settings.FromContext(ctx).DefaultInstanceProfile
 	if defaultProfile == "" {
 		return "", errors.New("neither spec.provider.instanceProfile nor --aws-default-instance-profile is specified")
 	}

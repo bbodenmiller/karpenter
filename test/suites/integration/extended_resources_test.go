@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/aws/karpenter-core/pkg/apis/v1alpha5"
 	"github.com/aws/karpenter-core/pkg/test"
@@ -46,7 +45,7 @@ var _ = Describe("Extended Resources", func() {
 			SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 		}})
 		provisioner := test.Provisioner(test.ProvisionerOptions{
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 			Requirements: []v1.NodeSelectorRequirement{
 				{
 					Key:      v1alpha1.LabelInstanceCategory,
@@ -75,7 +74,7 @@ var _ = Describe("Extended Resources", func() {
 		env.ExpectCreated(provisioner, provider, dep)
 		env.EventuallyExpectHealthyPodCount(selector, numPods)
 		env.ExpectCreatedNodeCount("==", 1)
-		env.EventuallyExpectCreatedNodesInitialized()
+		env.EventuallyExpectInitializedNodeCount("==", 1)
 	})
 	It("should provision nodes for a deployment that requests nvidia.com/gpu (Bottlerocket)", func() {
 		// For Bottlerocket, we are testing that resources are initialized without needing a device plugin
@@ -85,7 +84,7 @@ var _ = Describe("Extended Resources", func() {
 			SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 		}})
 		provisioner := test.Provisioner(test.ProvisionerOptions{
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 			Requirements: []v1.NodeSelectorRequirement{
 				{
 					Key:      v1alpha1.LabelInstanceCategory,
@@ -114,12 +113,12 @@ var _ = Describe("Extended Resources", func() {
 		env.ExpectCreated(provisioner, provider, dep)
 		env.EventuallyExpectHealthyPodCount(selector, numPods)
 		env.ExpectCreatedNodeCount("==", 1)
-		env.EventuallyExpectCreatedNodesInitialized()
+		env.EventuallyExpectInitializedNodeCount("==", 1)
 	})
 	It("should provision nodes for a deployment that requests vpc.amazonaws.com/pod-eni (security groups for pods)", func() {
-		ExpectPodENIEnabled()
+		env.ExpectPodENIEnabled()
 		DeferCleanup(func() {
-			ExpectPodENIDisabled()
+			env.ExpectPodENIDisabled()
 		})
 		env.ExpectSettingsOverridden(map[string]string{
 			"aws.enablePodENI": "true",
@@ -129,7 +128,7 @@ var _ = Describe("Extended Resources", func() {
 			SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 		}})
 		provisioner := test.Provisioner(test.ProvisionerOptions{
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 			Requirements: []v1.NodeSelectorRequirement{
 				{
 					Key:      v1alpha1.LabelInstanceCategory,
@@ -158,7 +157,7 @@ var _ = Describe("Extended Resources", func() {
 		env.ExpectCreated(provisioner, provider, dep)
 		env.EventuallyExpectHealthyPodCount(selector, numPods)
 		env.ExpectCreatedNodeCount("==", 1)
-		env.EventuallyExpectCreatedNodesInitialized()
+		env.EventuallyExpectInitializedNodeCount("==", 1)
 	})
 	It("should provision nodes for a deployment that requests amd.com/gpu", func() {
 		Skip("skipping test on AMD instance types")
@@ -182,7 +181,7 @@ var _ = Describe("Extended Resources", func() {
 		},
 		)
 		provisioner := test.Provisioner(test.ProvisionerOptions{
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 			Requirements: []v1.NodeSelectorRequirement{
 				{
 					Key:      v1alpha1.LabelInstanceCategory,
@@ -216,7 +215,7 @@ var _ = Describe("Extended Resources", func() {
 			g.Expect(env.Monitor.RunningPodsCount(selector)).To(Equal(numPods))
 		}).WithTimeout(15 * time.Minute).Should(Succeed()) // The node needs additional time to install the AMD GPU driver
 		env.ExpectCreatedNodeCount("==", 1)
-		env.EventuallyExpectCreatedNodesInitialized()
+		env.EventuallyExpectInitializedNodeCount("==", 1)
 	})
 	// Need to subscribe to the AMI to run the test successfully
 	// https://aws.amazon.com/marketplace/pp/prodview-st5jc2rk3phr2?sr=0-2&ref_=beagle&applicationId=AWSMPContessa
@@ -232,7 +231,7 @@ var _ = Describe("Extended Resources", func() {
 			AMISelector: map[string]string{"aws-ids": "ami-0fae925f94979981f"},
 		})
 		provisioner := test.Provisioner(test.ProvisionerOptions{
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 			Requirements: []v1.NodeSelectorRequirement{
 				{
 					Key:      v1alpha5.LabelCapacityType,
@@ -267,7 +266,7 @@ var _ = Describe("Extended Resources", func() {
 		env.ExpectCreated(provisioner, provider, dep)
 		env.EventuallyExpectHealthyPodCount(selector, numPods)
 		env.ExpectCreatedNodeCount("==", 1)
-		env.EventuallyExpectCreatedNodesInitialized()
+		env.EventuallyExpectInitializedNodeCount("==", 1)
 	})
 })
 
@@ -482,14 +481,4 @@ func ExpectHabanaDevicePluginCreated() {
 			},
 		},
 	})
-}
-
-func ExpectPodENIEnabled() {
-	env.ExpectDaemonSetEnvironmentVariableUpdatedWithOffset(1, types.NamespacedName{Namespace: "kube-system", Name: "aws-node"},
-		"ENABLE_POD_ENI", "true")
-}
-
-func ExpectPodENIDisabled() {
-	env.ExpectDaemonSetEnvironmentVariableUpdatedWithOffset(1, types.NamespacedName{Namespace: "kube-system", Name: "aws-node"},
-		"ENABLE_POD_ENI", "false")
 }

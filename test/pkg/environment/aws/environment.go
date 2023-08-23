@@ -17,33 +17,43 @@ package aws
 import (
 	"testing"
 
-	"github.com/aws/amazon-ec2-spot-interrupter/pkg/itn"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/eks"
+	"github.com/aws/aws-sdk-go/service/fis"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/aws/aws-sdk-go/service/timestreamwrite"
+	"github.com/aws/aws-sdk-go/service/timestreamwrite/timestreamwriteiface"
+	. "github.com/onsi/ginkgo/v2" //nolint:revive,stylecheck
 	"github.com/samber/lo"
+	"k8s.io/utils/env"
 
 	"github.com/aws/karpenter/pkg/controllers/interruption"
 	"github.com/aws/karpenter/test/pkg/environment/common"
 )
 
+const WindowsDefaultImage = "mcr.microsoft.com/oss/kubernetes/pause:3.9"
+
 type Environment struct {
 	*common.Environment
 	Region string
 
-	EC2API *ec2.EC2
-	SSMAPI *ssm.SSM
-	IAMAPI *iam.IAM
+	STSAPI        *sts.STS
+	EC2API        *ec2.EC2
+	SSMAPI        *ssm.SSM
+	IAMAPI        *iam.IAM
+	FISAPI        *fis.FIS
+	EKSAPI        *eks.EKS
+	TimeStreamAPI timestreamwriteiface.TimestreamWriteAPI
 
-	SQSProvider     *interruption.SQSProvider
-	InterruptionAPI *itn.ITN
+	SQSProvider *interruption.SQSProvider
 }
 
 func NewEnvironment(t *testing.T) *Environment {
@@ -59,16 +69,24 @@ func NewEnvironment(t *testing.T) *Environment {
 	))
 
 	return &Environment{
-		Region:          *session.Config.Region,
-		Environment:     env,
-		EC2API:          ec2.New(session),
-		SSMAPI:          ssm.New(session),
-		IAMAPI:          iam.New(session),
-		InterruptionAPI: itn.New(lo.Must(config.LoadDefaultConfig(env.Context))),
-		SQSProvider:     interruption.NewSQSProvider(sqs.New(session)),
+		Region:      *session.Config.Region,
+		Environment: env,
+
+		STSAPI:        sts.New(session),
+		EC2API:        ec2.New(session),
+		SSMAPI:        ssm.New(session),
+		IAMAPI:        iam.New(session),
+		FISAPI:        fis.New(session),
+		EKSAPI:        eks.New(session),
+		SQSProvider:   interruption.NewSQSProvider(sqs.New(session)),
+		TimeStreamAPI: GetTimeStreamAPI(session),
 	}
 }
 
-func (env *Environment) Stop() {
-	env.Environment.Stop()
+func GetTimeStreamAPI(session *session.Session) timestreamwriteiface.TimestreamWriteAPI {
+	if lo.Must(env.GetBool("ENABLE_METRICS", false)) {
+		By("enabling metrics firing for this suite")
+		return timestreamwrite.New(session, &aws.Config{Region: aws.String(env.GetString("METRICS_REGION", metricsDefaultRegion))})
+	}
+	return &NoOpTimeStreamAPI{}
 }

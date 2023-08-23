@@ -32,7 +32,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	clock "k8s.io/utils/clock/testing"
@@ -41,11 +40,10 @@ import (
 
 	coresettings "github.com/aws/karpenter-core/pkg/apis/settings"
 	"github.com/aws/karpenter-core/pkg/apis/v1alpha5"
-	corecloudproivder "github.com/aws/karpenter-core/pkg/cloudprovider"
+	corecloudprovider "github.com/aws/karpenter-core/pkg/cloudprovider"
 	"github.com/aws/karpenter-core/pkg/controllers/provisioning"
 	"github.com/aws/karpenter-core/pkg/controllers/state"
 	"github.com/aws/karpenter-core/pkg/events"
-	"github.com/aws/karpenter-core/pkg/operator/controller"
 	"github.com/aws/karpenter-core/pkg/operator/injection"
 	"github.com/aws/karpenter-core/pkg/operator/options"
 	"github.com/aws/karpenter-core/pkg/operator/scheme"
@@ -73,9 +71,10 @@ var awsEnv *test.Environment
 var fakeClock *clock.FakeClock
 var prov *provisioning.Provisioner
 var provisioner *v1alpha5.Provisioner
+var windowsProvisioner *v1alpha5.Provisioner
 var nodeTemplate *v1alpha1.AWSNodeTemplate
+var windowsNodeTemplate *v1alpha1.AWSNodeTemplate
 var cluster *state.Cluster
-var provisioningController controller.Controller
 var cloudProvider *cloudprovider.CloudProvider
 
 func TestAWS(t *testing.T) {
@@ -92,10 +91,9 @@ var _ = BeforeSuite(func() {
 	awsEnv = test.NewEnvironment(ctx, env)
 
 	fakeClock = &clock.FakeClock{}
-	cloudProvider = cloudprovider.New(ctx, awsEnv.InstanceTypesProvider, awsEnv.InstanceProvider, env.Client, awsEnv.AMIProvider)
+	cloudProvider = cloudprovider.New(awsEnv.InstanceTypesProvider, awsEnv.InstanceProvider, env.Client, awsEnv.AMIProvider, awsEnv.SecurityGroupProvider, awsEnv.SubnetProvider)
 	cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
-	prov = provisioning.NewProvisioner(ctx, env.Client, env.KubernetesInterface.CoreV1(), events.NewRecorder(&record.FakeRecorder{}), cloudProvider, cluster)
-	provisioningController = provisioning.NewController(env.Client, prov, events.NewRecorder(&record.FakeRecorder{}))
+	prov = provisioning.NewProvisioner(env.Client, env.KubernetesInterface.CoreV1(), events.NewRecorder(&record.FakeRecorder{}), cloudProvider, cluster)
 })
 
 var _ = AfterSuite(func() {
@@ -119,20 +117,36 @@ var _ = BeforeEach(func() {
 			},
 		},
 	}
-	nodeTemplate.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   v1alpha1.SchemeGroupVersion.Group,
-		Version: v1alpha1.SchemeGroupVersion.Version,
-		Kind:    "AWSNodeTemplate",
-	})
 	provisioner = test.Provisioner(coretest.ProvisionerOptions{
 		Requirements: []v1.NodeSelectorRequirement{{
 			Key:      v1alpha1.LabelInstanceCategory,
 			Operator: v1.NodeSelectorOpExists,
 		}},
-		ProviderRef: &v1alpha5.ProviderRef{
+		ProviderRef: &v1alpha5.MachineTemplateRef{
 			APIVersion: nodeTemplate.APIVersion,
 			Kind:       nodeTemplate.Kind,
 			Name:       nodeTemplate.Name,
+		},
+	})
+	windowsNodeTemplate = test.AWSNodeTemplate(v1alpha1.AWSNodeTemplateSpec{
+		AWS: v1alpha1.AWS{
+			AMIFamily: &v1alpha1.AMIFamilyWindows2022,
+		},
+	})
+	windowsProvisioner = test.Provisioner(coretest.ProvisionerOptions{
+		Requirements: []v1.NodeSelectorRequirement{
+			{
+				Key:      v1alpha1.LabelInstanceCategory,
+				Operator: v1.NodeSelectorOpExists,
+			},
+			{
+				Key:      v1.LabelOSStable,
+				Operator: v1.NodeSelectorOpIn,
+				Values:   []string{string(v1.Windows)},
+			},
+		},
+		ProviderRef: &v1alpha5.MachineTemplateRef{
+			Name: windowsNodeTemplate.Name,
 		},
 	})
 
@@ -148,7 +162,60 @@ var _ = AfterEach(func() {
 })
 
 var _ = Describe("Instance Types", func() {
-	It("should support instance type labels", func() {
+	It("should support individual instance type labels", func() {
+		ExpectApplied(ctx, env.Client, provisioner, windowsProvisioner, nodeTemplate, windowsNodeTemplate)
+
+		nodeSelector := map[string]string{
+			// Well known
+			v1alpha5.ProvisionerNameLabelKey: provisioner.Name,
+			v1.LabelTopologyRegion:           "",
+			v1.LabelTopologyZone:             "test-zone-1a",
+			v1.LabelInstanceTypeStable:       "g4dn.8xlarge",
+			v1.LabelOSStable:                 "linux",
+			v1.LabelArchStable:               "amd64",
+			v1alpha5.LabelCapacityType:       "on-demand",
+			// Well Known to AWS
+			v1alpha1.LabelInstanceHypervisor:                   "nitro",
+			v1alpha1.LabelInstanceEncryptionInTransitSupported: "true",
+			v1alpha1.LabelInstanceCategory:                     "g",
+			v1alpha1.LabelInstanceGeneration:                   "4",
+			v1alpha1.LabelInstanceFamily:                       "g4dn",
+			v1alpha1.LabelInstanceSize:                         "8xlarge",
+			v1alpha1.LabelInstanceCPU:                          "32",
+			v1alpha1.LabelInstanceMemory:                       "131072",
+			v1alpha1.LabelInstanceNetworkBandwidth:             "50000",
+			v1alpha1.LabelInstancePods:                         "58",
+			v1alpha1.LabelInstanceGPUName:                      "t4",
+			v1alpha1.LabelInstanceGPUManufacturer:              "nvidia",
+			v1alpha1.LabelInstanceGPUCount:                     "1",
+			v1alpha1.LabelInstanceGPUMemory:                    "16384",
+			v1alpha1.LabelInstanceLocalNVME:                    "900",
+			v1alpha1.LabelInstanceAcceleratorName:              "inferentia",
+			v1alpha1.LabelInstanceAcceleratorManufacturer:      "aws",
+			v1alpha1.LabelInstanceAcceleratorCount:             "1",
+			// Deprecated Labels
+			v1.LabelFailureDomainBetaRegion: "",
+			v1.LabelFailureDomainBetaZone:   "test-zone-1a",
+			"beta.kubernetes.io/arch":       "amd64",
+			"beta.kubernetes.io/os":         "linux",
+			v1.LabelInstanceType:            "g4dn.8xlarge",
+			"topology.ebs.csi.aws.com/zone": "test-zone-1a",
+			v1.LabelWindowsBuild:            v1alpha1.Windows2022Build,
+		}
+
+		// Ensure that we're exercising all well known labels
+		Expect(lo.Keys(nodeSelector)).To(ContainElements(append(v1alpha5.WellKnownLabels.UnsortedList(), lo.Keys(v1alpha5.NormalizedLabels)...)))
+
+		var pods []*v1.Pod
+		for key, value := range nodeSelector {
+			pods = append(pods, coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{key: value}}))
+		}
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		for _, pod := range pods {
+			ExpectScheduled(ctx, env.Client, pod)
+		}
+	})
+	It("should support combined instance type labels", func() {
 		ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 
 		nodeSelector := map[string]string{
@@ -185,10 +252,68 @@ var _ = Describe("Instance Types", func() {
 			"topology.ebs.csi.aws.com/zone": "test-zone-1a",
 		}
 
-		// Ensure that we're exercising all well known labels
-		Expect(lo.Keys(nodeSelector)).To(ContainElements(append(v1alpha5.WellKnownLabels.UnsortedList(), lo.Keys(v1alpha5.NormalizedLabels)...)))
+		// Ensure that we're exercising all well known labels except for accelerator labels
+		Expect(lo.Keys(nodeSelector)).To(ContainElements(
+			append(
+				v1alpha5.WellKnownLabels.Difference(sets.New(
+					v1alpha1.LabelInstanceAcceleratorCount,
+					v1alpha1.LabelInstanceAcceleratorName,
+					v1alpha1.LabelInstanceAcceleratorManufacturer,
+					v1.LabelWindowsBuild,
+				)).UnsortedList(), lo.Keys(v1alpha5.NormalizedLabels)...)))
+
 		pod := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: nodeSelector})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectScheduled(ctx, env.Client, pod)
+	})
+	It("should support instance type labels with accelerator", func() {
+		ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
+
+		nodeSelector := map[string]string{
+			// Well known
+			v1alpha5.ProvisionerNameLabelKey: provisioner.Name,
+			v1.LabelTopologyRegion:           "",
+			v1.LabelTopologyZone:             "test-zone-1a",
+			v1.LabelInstanceTypeStable:       "inf1.2xlarge",
+			v1.LabelOSStable:                 "linux",
+			v1.LabelArchStable:               "amd64",
+			v1alpha5.LabelCapacityType:       "on-demand",
+			// Well Known to AWS
+			v1alpha1.LabelInstanceHypervisor:                   "nitro",
+			v1alpha1.LabelInstanceEncryptionInTransitSupported: "true",
+			v1alpha1.LabelInstanceCategory:                     "inf",
+			v1alpha1.LabelInstanceGeneration:                   "1",
+			v1alpha1.LabelInstanceFamily:                       "inf1",
+			v1alpha1.LabelInstanceSize:                         "2xlarge",
+			v1alpha1.LabelInstanceCPU:                          "8",
+			v1alpha1.LabelInstanceMemory:                       "16384",
+			v1alpha1.LabelInstanceNetworkBandwidth:             "5000",
+			v1alpha1.LabelInstancePods:                         "38",
+			v1alpha1.LabelInstanceAcceleratorName:              "inferentia",
+			v1alpha1.LabelInstanceAcceleratorManufacturer:      "aws",
+			v1alpha1.LabelInstanceAcceleratorCount:             "1",
+			// Deprecated Labels
+			v1.LabelFailureDomainBetaRegion: "",
+			v1.LabelFailureDomainBetaZone:   "test-zone-1a",
+			"beta.kubernetes.io/arch":       "amd64",
+			"beta.kubernetes.io/os":         "linux",
+			v1.LabelInstanceType:            "inf1.2xlarge",
+			"topology.ebs.csi.aws.com/zone": "test-zone-1a",
+		}
+
+		// Ensure that we're exercising all well known labels except for gpu labels and nvme
+		expectedLabels := append(v1alpha5.WellKnownLabels.Difference(sets.New(
+			v1alpha1.LabelInstanceGPUCount,
+			v1alpha1.LabelInstanceGPUName,
+			v1alpha1.LabelInstanceGPUManufacturer,
+			v1alpha1.LabelInstanceGPUMemory,
+			v1alpha1.LabelInstanceLocalNVME,
+			v1.LabelWindowsBuild,
+		)).UnsortedList(), lo.Keys(v1alpha5.NormalizedLabels)...)
+		Expect(lo.Keys(nodeSelector)).To(ContainElements(expectedLabels))
+
+		pod := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: nodeSelector})
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 	})
 	It("should not launch AWS Pod ENI on a t3", func() {
@@ -202,7 +327,7 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1alpha1.ResourceAWSPodENI: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectNotScheduled(ctx, env.Client, pod)
 	})
 	It("should order the instance types by price and only consider the cheapest ones", func() {
@@ -220,7 +345,7 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 		its, err := cloudProvider.GetInstanceTypes(ctx, provisioner)
 		Expect(err).To(BeNil())
@@ -236,7 +361,7 @@ var _ = Describe("Instance Types", func() {
 			return iPrice < jPrice
 		})
 		// Expect that the launch template overrides gives the 60 cheapest instance types
-		expected := sets.NewString(lo.Map(its[:instance.MaxInstanceTypes], func(i *corecloudproivder.InstanceType, _ int) string {
+		expected := sets.NewString(lo.Map(its[:instance.MaxInstanceTypes], func(i *corecloudprovider.InstanceType, _ int) string {
 			return i.Name
 		})...)
 		Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
@@ -277,7 +402,7 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		its, err := cloudProvider.GetInstanceTypes(ctx, provisioner)
@@ -322,7 +447,7 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
@@ -341,7 +466,7 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
@@ -368,10 +493,10 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 	})
-	It("should fail to launch AWS Pod ENI if the command line option enabling it isn't set", func() {
+	It("should fail to launch AWS Pod ENI if the setting enabling it isn't set", func() {
 		ctx = settings.ToContext(ctx, test.Settings(test.SettingOptions{
 			EnablePodENI: lo.ToPtr(false),
 		}))
@@ -382,7 +507,7 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1alpha1.ResourceAWSPodENI: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		ExpectNotScheduled(ctx, env.Client, pod)
 	})
 	It("should launch AWS Pod ENI on a compatible instance type", func() {
@@ -393,7 +518,7 @@ var _ = Describe("Instance Types", func() {
 				Limits:   v1.ResourceList{v1alpha1.ResourceAWSPodENI: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 		node := ExpectScheduled(ctx, env.Client, pod)
 		Expect(node.Labels).To(HaveKey(v1.LabelInstanceTypeStable))
 		supportsPodENI := func() bool {
@@ -427,7 +552,7 @@ var _ = Describe("Instance Types", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1.LabelInstanceTypeStable, "p3.8xlarge"))
@@ -458,7 +583,7 @@ var _ = Describe("Instance Types", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1.LabelInstanceTypeStable, "dl1.24xlarge"))
@@ -491,13 +616,39 @@ var _ = Describe("Instance Types", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1.LabelInstanceTypeStable, "inf1.6xlarge"))
 			nodeNames.Insert(node.Name)
 		}
 		Expect(nodeNames.Len()).To(Equal(2))
+	})
+	It("should launch trn1 instances for AWS Neuron resource requests", func() {
+		nodeNames := sets.NewString()
+		provisioner.Spec.Requirements = []v1.NodeSelectorRequirement{
+			{
+				Key:      v1.LabelInstanceTypeStable,
+				Operator: v1.NodeSelectorOpIn,
+				Values:   []string{"trn1.2xlarge"},
+			},
+		}
+		ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
+		pods := []*v1.Pod{
+			coretest.UnschedulablePod(coretest.PodOptions{
+				ResourceRequirements: v1.ResourceRequirements{
+					Requests: v1.ResourceList{v1alpha1.ResourceAWSNeuron: resource.MustParse("1")},
+					Limits:   v1.ResourceList{v1alpha1.ResourceAWSNeuron: resource.MustParse("1")},
+				},
+			}),
+		}
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		for _, pod := range pods {
+			node := ExpectScheduled(ctx, env.Client, pod)
+			Expect(node.Labels).To(HaveKeyWithValue(v1.LabelInstanceTypeStable, "trn1.2xlarge"))
+			nodeNames.Insert(node.Name)
+		}
+		Expect(nodeNames.Len()).To(Equal(1))
 	})
 	It("should set pods to 110 if not using ENI-based pod density", func() {
 		ctx = settings.ToContext(ctx, test.Settings(test.SettingOptions{
@@ -518,12 +669,73 @@ var _ = Describe("Instance Types", func() {
 			Expect(it.Capacity.Pods().Value()).ToNot(BeNumerically("==", 110))
 		}
 	})
+	It("should set pods to 110 even ENILimitedPodDensity is enabled in awssettings but amifamily doesn't support", func() {
+		instanceInfo, err := awsEnv.InstanceTypesProvider.GetInstanceTypes(ctx)
+		Expect(err).To(BeNil())
+		windowsNodeTemplate := &v1alpha1.AWSNodeTemplate{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: coretest.RandomName(),
+			},
+			Spec: v1alpha1.AWSNodeTemplateSpec{
+				AWS: v1alpha1.AWS{
+					AMIFamily:             aws.String(v1alpha1.AMIFamilyWindows2019),
+					SubnetSelector:        map[string]string{"*": "*"},
+					SecurityGroupSelector: map[string]string{"*": "*"},
+				},
+			},
+		}
 
-	Context("KubeletConfiguration Overrides", func() {
+		ctx = settings.ToContext(ctx, test.Settings(test.SettingOptions{
+			EnableENILimitedPodDensity: lo.ToPtr(true),
+		}))
+		for _, info := range instanceInfo {
+			it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", windowsNodeTemplate, nil)
+			Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", 110))
+		}
+	})
+
+	It("should expose vcpu metrics for instance types", func() {
+		instanceInfo, err := awsEnv.InstanceTypesProvider.List(ctx, provisioner.Spec.KubeletConfiguration, nodeTemplate)
+		Expect(err).To(BeNil())
+		Expect(len(instanceInfo)).To(BeNumerically(">", 0))
+		for _, info := range instanceInfo {
+			metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_cpu_cores", map[string]string{
+				instancetype.InstanceTypeLabel: info.Name,
+			})
+			Expect(ok).To(BeTrue())
+			Expect(metric).To(Not(BeNil()))
+			value := metric.GetGauge().Value
+			Expect(aws.Float64Value(value)).To(BeNumerically(">", 0))
+		}
+	})
+	It("should expose memory metrics for instance types", func() {
+		instanceInfo, err := awsEnv.InstanceTypesProvider.List(ctx, provisioner.Spec.KubeletConfiguration, nodeTemplate)
+		Expect(err).To(BeNil())
+		Expect(len(instanceInfo)).To(BeNumerically(">", 0))
+		for _, info := range instanceInfo {
+			metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_memory_bytes", map[string]string{
+				instancetype.InstanceTypeLabel: info.Name,
+			})
+			Expect(ok).To(BeTrue())
+			Expect(metric).To(Not(BeNil()))
+			value := metric.GetGauge().Value
+			Expect(aws.Float64Value(value)).To(BeNumerically(">", 0))
+		}
+	})
+
+	Context("Overhead", func() {
 		var info *ec2.InstanceTypeInfo
 		BeforeEach(func() {
+			ctx, err := (&settings.Settings{}).Inject(ctx, &v1.ConfigMap{
+				Data: map[string]string{
+					"aws.clusterName": "karpenter-cluster",
+				},
+			})
+			Expect(err).To(BeNil())
+
+			s := settings.FromContext(ctx)
 			ctx = settings.ToContext(ctx, test.Settings(test.SettingOptions{
-				VMMemoryOverheadPercent: lo.ToPtr[float64](0),
+				VMMemoryOverheadPercent: &s.VMMemoryOverheadPercent,
 			}))
 
 			var ok bool
@@ -534,45 +746,49 @@ var _ = Describe("Instance Types", func() {
 			})
 			Expect(ok).To(BeTrue())
 		})
-		Context("Reserved Resources", func() {
+		Context("System Reserved Resources", func() {
+			It("should use defaults when no kubelet is specified", func() {
+				it := instancetype.NewInstanceType(ctx, info, &v1alpha5.KubeletConfiguration{}, "", nodeTemplate, nil)
+				Expect(it.Overhead.SystemReserved.Cpu().String()).To(Equal("0"))
+				Expect(it.Overhead.SystemReserved.Memory().String()).To(Equal("0"))
+				Expect(it.Overhead.SystemReserved.StorageEphemeral().String()).To(Equal("0"))
+			})
 			It("should override system reserved cpus when specified", func() {
 				provisioner = test.Provisioner(coretest.ProvisionerOptions{
 					Kubelet: &v1alpha5.KubeletConfiguration{
 						SystemReserved: v1.ResourceList{
-							v1.ResourceCPU: resource.MustParse("2"),
+							v1.ResourceCPU:              resource.MustParse("2"),
+							v1.ResourceMemory:           resource.MustParse("20Gi"),
+							v1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
 						},
 					},
 				})
 				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
 				Expect(it.Overhead.SystemReserved.Cpu().String()).To(Equal("2"))
-			})
-			It("should override system reserved memory when specified", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
-						},
-					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
 				Expect(it.Overhead.SystemReserved.Memory().String()).To(Equal("20Gi"))
+				Expect(it.Overhead.SystemReserved.StorageEphemeral().String()).To(Equal("10Gi"))
+			})
+		})
+		Context("Kube Reserved Resources", func() {
+			It("should use defaults when no kubelet is specified", func() {
+				it := instancetype.NewInstanceType(ctx, info, &v1alpha5.KubeletConfiguration{}, "", nodeTemplate, nil)
+				Expect(it.Overhead.KubeReserved.Cpu().String()).To(Equal("80m"))
+				Expect(it.Overhead.KubeReserved.Memory().String()).To(Equal("893Mi"))
+				Expect(it.Overhead.KubeReserved.StorageEphemeral().String()).To(Equal("1Gi"))
 			})
 			It("should override kube reserved when specified", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceCPU:              resource.MustParse("1"),
-							v1.ResourceMemory:           resource.MustParse("20Gi"),
-							v1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
-						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceCPU:              resource.MustParse("2"),
-							v1.ResourceMemory:           resource.MustParse("10Gi"),
-							v1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
-						},
+				it := instancetype.NewInstanceType(ctx, info, &v1alpha5.KubeletConfiguration{
+					SystemReserved: v1.ResourceList{
+						v1.ResourceCPU:              resource.MustParse("1"),
+						v1.ResourceMemory:           resource.MustParse("20Gi"),
+						v1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
 					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					KubeReserved: v1.ResourceList{
+						v1.ResourceCPU:              resource.MustParse("2"),
+						v1.ResourceMemory:           resource.MustParse("10Gi"),
+						v1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+					},
+				}, "", nodeTemplate, nil)
 				Expect(it.Overhead.KubeReserved.Cpu().String()).To(Equal("2"))
 				Expect(it.Overhead.KubeReserved.Memory().String()).To(Equal("10Gi"))
 				Expect(it.Overhead.KubeReserved.StorageEphemeral().String()).To(Equal("2Gi"))
@@ -584,148 +800,158 @@ var _ = Describe("Instance Types", func() {
 					VMMemoryOverheadPercent: lo.ToPtr[float64](0),
 				}))
 			})
-			It("should override eviction threshold (hard) when specified as a quantity", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
+			Context("Eviction Hard", func() {
+				It("should override eviction threshold when specified as a quantity", func() {
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionHard: map[string]string{
+								instancetype.MemoryAvailable: "500Mi",
+							},
 						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionHard: map[string]string{
-							instancetype.MemoryAvailable: "500Mi",
-						},
-					},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("500Mi"))
 				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("500Mi"))
+				It("should override eviction threshold when specified as a percentage value", func() {
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionHard: map[string]string{
+								instancetype.MemoryAvailable: "10%",
+							},
+						},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().Value()).To(BeNumerically("~", float64(it.Capacity.Memory().Value())*0.1, 10))
+				})
+				It("should consider the eviction threshold disabled when specified as 100%", func() {
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionHard: map[string]string{
+								instancetype.MemoryAvailable: "100%",
+							},
+						},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("0"))
+				})
+				It("should used default eviction threshold for memory when evictionHard not specified", func() {
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionSoft: map[string]string{
+								instancetype.MemoryAvailable: "50Mi",
+							},
+						},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("50Mi"))
+				})
 			})
-			It("should override eviction threshold (hard) when specified as a percentage value", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
+			Context("Eviction Soft", func() {
+				It("should override eviction threshold when specified as a quantity", func() {
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionSoft: map[string]string{
+								instancetype.MemoryAvailable: "500Mi",
+							},
 						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionHard: map[string]string{
-							instancetype.MemoryAvailable: "10%",
-						},
-					},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("500Mi"))
 				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().Value()).To(BeNumerically("~", float64(it.Capacity.Memory().Value())*0.1, 10))
+				It("should override eviction threshold when specified as a percentage value", func() {
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionHard: map[string]string{
+								instancetype.MemoryAvailable: "5%",
+							},
+							EvictionSoft: map[string]string{
+								instancetype.MemoryAvailable: "10%",
+							},
+						},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().Value()).To(BeNumerically("~", float64(it.Capacity.Memory().Value())*0.1, 10))
+				})
+				It("should consider the eviction threshold disabled when specified as 100%", func() {
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionSoft: map[string]string{
+								instancetype.MemoryAvailable: "100%",
+							},
+						},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("0"))
+				})
+				It("should ignore eviction threshold when using Bottlerocket AMI", func() {
+					nodeTemplate.Spec.AMIFamily = &v1alpha1.AMIFamilyBottlerocket
+					provisioner = test.Provisioner(coretest.ProvisionerOptions{
+						Kubelet: &v1alpha5.KubeletConfiguration{
+							SystemReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("20Gi"),
+							},
+							KubeReserved: v1.ResourceList{
+								v1.ResourceMemory: resource.MustParse("10Gi"),
+							},
+							EvictionHard: map[string]string{
+								instancetype.MemoryAvailable: "1Gi",
+							},
+							EvictionSoft: map[string]string{
+								instancetype.MemoryAvailable: "10Gi",
+							},
+						},
+					})
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("1Gi"))
+				})
 			})
-			It("should consider the eviction threshold (hard) disabled when specified as 100%", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
-						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionHard: map[string]string{
-							instancetype.MemoryAvailable: "100%",
-						},
-					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("0"))
-			})
-			It("should used default eviction threshold (hard) for memory when evictionHard not specified", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
-						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionSoft: map[string]string{
-							instancetype.MemoryAvailable: "50Mi",
-						},
-					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("50Mi"))
-			})
-			It("should override eviction threshold (soft) when specified as a quantity", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
-						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionSoft: map[string]string{
-							instancetype.MemoryAvailable: "500Mi",
-						},
-					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("500Mi"))
-			})
-			It("should override eviction threshold (soft) when specified as a percentage value", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
-						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionHard: map[string]string{
-							instancetype.MemoryAvailable: "5%",
-						},
-						EvictionSoft: map[string]string{
-							instancetype.MemoryAvailable: "10%",
-						},
-					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().Value()).To(BeNumerically("~", float64(it.Capacity.Memory().Value())*0.1, 10))
-			})
-			It("should consider the eviction threshold (soft) disabled when specified as 100%", func() {
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
-						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionSoft: map[string]string{
-							instancetype.MemoryAvailable: "100%",
-						},
-					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("0"))
-			})
-			It("should ignore eviction threshold (soft) when using Bottlerocket AMI", func() {
-				nodeTemplate.Spec.AMIFamily = &v1alpha1.AMIFamilyBottlerocket
-				provisioner = test.Provisioner(coretest.ProvisionerOptions{
-					Kubelet: &v1alpha5.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("20Gi"),
-						},
-						KubeReserved: v1.ResourceList{
-							v1.ResourceMemory: resource.MustParse("10Gi"),
-						},
-						EvictionHard: map[string]string{
-							instancetype.MemoryAvailable: "1Gi",
-						},
-						EvictionSoft: map[string]string{
-							instancetype.MemoryAvailable: "10Gi",
-						},
-					},
-				})
-				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("1Gi"))
+			It("should take the default eviction threshold when none is specified", func() {
+				it := instancetype.NewInstanceType(ctx, info, &v1alpha5.KubeletConfiguration{}, "", nodeTemplate, nil)
+				Expect(it.Overhead.EvictionThreshold.Cpu().String()).To(Equal("0"))
+				Expect(it.Overhead.EvictionThreshold.Memory().String()).To(Equal("100Mi"))
+				Expect(it.Overhead.EvictionThreshold.StorageEphemeral().AsApproximateFloat64()).To(BeNumerically("~", resources.Quantity("2Gi").AsApproximateFloat64()))
 			})
 			It("should take the greater of evictionHard and evictionSoft for overhead as a value", func() {
 				provisioner = test.Provisioner(coretest.ProvisionerOptions{
@@ -788,6 +1014,21 @@ var _ = Describe("Instance Types", func() {
 				Expect(it.Overhead.EvictionThreshold.Memory().Value()).To(BeNumerically("~", float64(it.Capacity.Memory().Value())*0.1, 10))
 			})
 		})
+		It("should default max pods based off of network interfaces", func() {
+			instanceInfo, err := awsEnv.InstanceTypesProvider.GetInstanceTypes(ctx)
+			Expect(err).To(BeNil())
+			provisioner = test.Provisioner(coretest.ProvisionerOptions{})
+			for _, info := range instanceInfo {
+				if *info.InstanceType == "t3.large" {
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", 35))
+				}
+				if *info.InstanceType == "m6idn.32xlarge" {
+					it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+					Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", 345))
+				}
+			}
+		})
 		It("should set max-pods to user-defined value if specified", func() {
 			instanceInfo, err := awsEnv.InstanceTypesProvider.GetInstanceTypes(ctx)
 			Expect(err).To(BeNil())
@@ -809,6 +1050,47 @@ var _ = Describe("Instance Types", func() {
 				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
 				Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", 10))
 			}
+		})
+		It("should reserve ENIs when aws.reservedENIs is set and is used in max-pods calculation", func() {
+			ctx = settings.ToContext(ctx, test.Settings(test.SettingOptions{
+				ReservedENIs: lo.ToPtr(1),
+			}))
+
+			instanceInfo, err := awsEnv.InstanceTypesProvider.GetInstanceTypes(ctx)
+			Expect(err).To(BeNil())
+			t3Large, ok := lo.Find(instanceInfo, func(info *ec2.InstanceTypeInfo) bool {
+				return *info.InstanceType == "t3.large"
+			})
+			Expect(ok).To(Equal(true))
+			it := instancetype.NewInstanceType(ctx, t3Large, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+			// t3.large
+			// maxInterfaces = 3
+			// maxIPv4PerInterface = 12
+			// reservedENIs = 1
+			// (3 - 1) * (12 - 1) + 2 = 24
+			maxPods := 24
+			Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", maxPods))
+		})
+		It("should reserve ENIs when aws.reservedENIs is set and not go below 0 ENIs in max-pods calculation", func() {
+			ctx = settings.ToContext(ctx, test.Settings(test.SettingOptions{
+				ReservedENIs: lo.ToPtr(1_000_000),
+			}))
+
+			instanceInfo, err := awsEnv.InstanceTypesProvider.GetInstanceTypes(ctx)
+			Expect(err).To(BeNil())
+			t3Large, ok := lo.Find(instanceInfo, func(info *ec2.InstanceTypeInfo) bool {
+				return *info.InstanceType == "t3.large"
+			})
+			Expect(ok).To(Equal(true))
+			it := instancetype.NewInstanceType(ctx, t3Large, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
+			// t3.large
+			// maxInterfaces = 3
+			// maxIPv4PerInterface = 12
+			// reservedENIs = 1,000,000
+			// max(3 - 1,000,000, 0) * (12 - 1) + 2 = 2
+			// if max-pods is 2, we output 0
+			maxPods := 0
+			Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", maxPods))
 		})
 		It("should override pods-per-core value", func() {
 			instanceInfo, err := awsEnv.InstanceTypesProvider.GetInstanceTypes(ctx)
@@ -835,7 +1117,7 @@ var _ = Describe("Instance Types", func() {
 			provisioner = test.Provisioner(coretest.ProvisionerOptions{Kubelet: &v1alpha5.KubeletConfiguration{PodsPerCore: ptr.Int32(1)}})
 			for _, info := range instanceInfo {
 				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
-				limitedPods := resources.Quantity(fmt.Sprint(*info.NetworkInfo.MaximumNetworkInterfaces*(*info.NetworkInfo.Ipv4AddressesPerInterface-1) + 2))
+				limitedPods := instancetype.ENILimitedPods(ctx, info)
 				Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", limitedPods.Value()))
 			}
 		})
@@ -850,6 +1132,57 @@ var _ = Describe("Instance Types", func() {
 			for _, info := range instanceInfo {
 				it := instancetype.NewInstanceType(ctx, info, provisioner.Spec.KubeletConfiguration, "", nodeTemplate, nil)
 				Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", 110))
+			}
+		})
+		It("shouldn't report more resources than are actually available on instances", func() {
+
+			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
+			its, err := cloudProvider.GetInstanceTypes(ctx, provisioner)
+			Expect(err).To(BeNil())
+
+			instanceTypes := map[string]*corecloudprovider.InstanceType{}
+			for _, it := range its {
+				instanceTypes[it.Name] = it
+			}
+
+			for _, tc := range []struct {
+				InstanceType string
+				// Actual allocatable values as reported by the node from kubelet. You find these
+				// by launching the node and inspecting the node status allocatable.
+				Memory resource.Quantity
+				CPU    resource.Quantity
+			}{
+				{
+					InstanceType: "t4g.small",
+					Memory:       resource.MustParse("1408312Ki"),
+					CPU:          resource.MustParse("1930m"),
+				},
+				{
+					InstanceType: "t4g.medium",
+					Memory:       resource.MustParse("3377496Ki"),
+					CPU:          resource.MustParse("1930m"),
+				},
+				{
+					InstanceType: "t4g.xlarge",
+					Memory:       resource.MustParse("15136012Ki"),
+					CPU:          resource.MustParse("3920m"),
+				},
+				{
+					InstanceType: "m5.large",
+					Memory:       resource.MustParse("7220184Ki"),
+					CPU:          resource.MustParse("1930m"),
+				},
+			} {
+				it, ok := instanceTypes[tc.InstanceType]
+				Expect(ok).To(BeTrue(), fmt.Sprintf("didn't find instance type %q, add to instanceTypeTestData in ./hack/codegen.sh", tc.InstanceType))
+
+				allocatable := it.Allocatable()
+				// We need to ensure that our estimate of the allocatable resources <= the value that kubelet reports.  If it's greater,
+				// we can launch nodes that can't actually run the pods.
+				Expect(allocatable.Memory().AsApproximateFloat64()).To(BeNumerically("<=", tc.Memory.AsApproximateFloat64()),
+					fmt.Sprintf("memory estimate for %s was too large, had %s vs %s", tc.InstanceType, allocatable.Memory().String(), tc.Memory.String()))
+				Expect(allocatable.Cpu().AsApproximateFloat64()).To(BeNumerically("<=", tc.CPU.AsApproximateFloat64()),
+					fmt.Sprintf("CPU estimate for %s was too large, had %s vs %s", tc.InstanceType, allocatable.Cpu().String(), tc.CPU.String()))
 			}
 		})
 	})
@@ -873,16 +1206,16 @@ var _ = Describe("Instance Types", func() {
 					},
 				}),
 			}
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
 			// it should've tried to pack them on a single inf1.6xlarge then hit an insufficient capacity error
 			for _, pod := range pods {
 				ExpectNotScheduled(ctx, env.Client, pod)
 			}
 			nodeNames := sets.NewString()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
 			for _, pod := range pods {
 				node := ExpectScheduled(ctx, env.Client, pod)
-				Expect(node.Labels).To(HaveKeyWithValue(v1.LabelInstanceTypeStable, "inf1.2xlarge"))
+				Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.LabelInstanceAcceleratorName, "inferentia"))
 				nodeNames.Insert(node.Name)
 			}
 			Expect(nodeNames.Len()).To(Equal(2))
@@ -904,11 +1237,11 @@ var _ = Describe("Instance Types", func() {
 				},
 			}}}
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			// it should've tried to pack them in test-zone-1a on a p3.8xlarge then hit insufficient capacity, the next attempt will try test-zone-1b
 			ExpectNotScheduled(ctx, env.Client, pod)
 
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(SatisfyAll(
 				HaveKeyWithValue(v1.LabelInstanceTypeStable, "p3.8xlarge"),
@@ -936,11 +1269,11 @@ var _ = Describe("Instance Types", func() {
 			}
 			// Provisions 2 m5.large instances since m5.xlarge was ICE'd
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
 			for _, pod := range pods {
 				ExpectNotScheduled(ctx, env.Client, pod)
 			}
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
 			for _, pod := range pods {
 				node := ExpectScheduled(ctx, env.Client, pod)
 				Expect(node.Labels[v1.LabelInstanceTypeStable]).To(Equal("m5.large"))
@@ -956,12 +1289,12 @@ var _ = Describe("Instance Types", func() {
 					Limits:   v1.ResourceList{v1alpha1.ResourceAWSNeuron: resource.MustParse("2")},
 				},
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 			// capacity shortage is over - expire the item from the cache and try again
 			awsEnv.EC2API.InsufficientCapacityPools.Set([]fake.CapacityPool{})
 			awsEnv.UnavailableOfferingsCache.Delete("inf1.6xlarge", "test-zone-1a", v1alpha5.CapacityTypeOnDemand)
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1.LabelInstanceTypeStable, "inf1.6xlarge"))
 		})
@@ -982,11 +1315,11 @@ var _ = Describe("Instance Types", func() {
 				},
 			}}}
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			// it should've tried to pack them in test-zone-1a on a dl1.24xlarge then hit insufficient capacity, the next attempt will try test-zone-1b
 			ExpectNotScheduled(ctx, env.Client, pod)
 
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(SatisfyAll(
 				HaveKeyWithValue(v1.LabelInstanceTypeStable, "dl1.24xlarge"),
@@ -1006,10 +1339,10 @@ var _ = Describe("Instance Types", func() {
 			// Spot Unavailable
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 			// include deprioritized instance types
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			// Fallback to OD
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1alpha5.LabelCapacityType, v1alpha5.CapacityTypeOnDemand))
@@ -1036,7 +1369,7 @@ var _ = Describe("Instance Types", func() {
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			for _, ct := range []string{v1alpha5.CapacityTypeOnDemand, v1alpha5.CapacityTypeSpot} {
 				for _, zone := range []string{"test-zone-1a", "test-zone-1b"} {
-					ExpectProvisioned(ctx, env.Client, cluster, prov,
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov,
 						coretest.UnschedulablePod(coretest.PodOptions{
 							ResourceRequirements: v1.ResourceRequirements{
 								Requests: v1.ResourceList{v1.ResourceCPU: resource.MustParse("1")},
@@ -1067,7 +1400,7 @@ var _ = Describe("Instance Types", func() {
 		It("should default to on-demand", func() {
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1alpha5.LabelCapacityType, v1alpha5.CapacityTypeOnDemand))
 		})
@@ -1076,7 +1409,7 @@ var _ = Describe("Instance Types", func() {
 				{Key: v1alpha5.LabelCapacityType, Operator: v1.NodeSelectorOpIn, Values: []string{v1alpha5.CapacityTypeSpot, v1alpha5.CapacityTypeOnDemand}}}
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1alpha5.LabelCapacityType, v1alpha5.CapacityTypeSpot))
 		})
@@ -1104,7 +1437,7 @@ var _ = Describe("Instance Types", func() {
 			// Instance type with no zonal availability for spot shouldn't be scheduled
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 		})
 		It("should succeed to launch spot instance when zonal availability exists", func() {
@@ -1130,23 +1463,98 @@ var _ = Describe("Instance Types", func() {
 
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(v1alpha5.ProvisionerNameLabelKey, provisioner.Name))
+		})
+	})
+	Context("Ephemeral Storage", func() {
+		BeforeEach(func() {
+			nodeTemplate.Spec.AMIFamily = aws.String(v1alpha1.AMIFamilyAL2)
+			nodeTemplate.Spec.BlockDeviceMappings = []*v1alpha1.BlockDeviceMapping{
+				{
+					DeviceName: aws.String("/dev/xvda"),
+					EBS: &v1alpha1.BlockDevice{
+						SnapshotID: aws.String("snap-xxxxxxxx"),
+					},
+				},
+			}
+		})
+		It("should default to EBS defaults when volumeSize is not defined in blockDeviceMappings for custom AMIs", func() {
+			nodeTemplate.Spec.AMIFamily = aws.String(v1alpha1.AMIFamilyCustom)
+			nodeTemplate.Spec.AMISelector = map[string]string{
+				"*": "*",
+			}
+			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			node := ExpectScheduled(ctx, env.Client, pod)
+			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
+			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(BeNumerically(">=", 1))
+			awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
+				Expect(ltInput.LaunchTemplateData.BlockDeviceMappings).To(HaveLen(1))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].DeviceName).To(Equal("/dev/xvda"))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].Ebs.SnapshotId).To(Equal("snap-xxxxxxxx"))
+			})
+		})
+		It("should default to EBS defaults when volumeSize is not defined in blockDeviceMappings for AL2 Root volume", func() {
+			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			node := ExpectScheduled(ctx, env.Client, pod)
+			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
+			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(BeNumerically(">=", 1))
+			awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
+				Expect(ltInput.LaunchTemplateData.BlockDeviceMappings).To(HaveLen(1))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].DeviceName).To(Equal("/dev/xvda"))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].Ebs.SnapshotId).To(Equal("snap-xxxxxxxx"))
+			})
+		})
+		It("should default to EBS defaults when volumeSize is not defined in blockDeviceMappings for Bottlerocket Root volume", func() {
+			nodeTemplate.Spec.AMIFamily = aws.String(v1alpha1.AMIFamilyBottlerocket)
+			nodeTemplate.Spec.BlockDeviceMappings[0].DeviceName = aws.String("/dev/xvdb")
+			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			node := ExpectScheduled(ctx, env.Client, pod)
+			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
+			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(BeNumerically(">=", 1))
+			awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
+				Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
+				Expect(ltInput.LaunchTemplateData.BlockDeviceMappings).To(HaveLen(1))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].DeviceName).To(Equal("/dev/xvdb"))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].Ebs.SnapshotId).To(Equal("snap-xxxxxxxx"))
+			})
+		})
+		It("should default to EBS defaults when volumeSize is not defined in blockDeviceMappings for Ubuntu Root volume", func() {
+			nodeTemplate.Spec.AMIFamily = aws.String(v1alpha1.AMIFamilyUbuntu)
+			nodeTemplate.Spec.BlockDeviceMappings[0].DeviceName = aws.String("/dev/sda1")
+			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			node := ExpectScheduled(ctx, env.Client, pod)
+			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
+			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(BeNumerically(">=", 1))
+			awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
+				Expect(ltInput.LaunchTemplateData.BlockDeviceMappings).To(HaveLen(1))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].DeviceName).To(Equal("/dev/sda1"))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].Ebs.SnapshotId).To(Equal("snap-xxxxxxxx"))
+			})
 		})
 	})
 	Context("Metadata Options", func() {
 		It("should default metadata options on generated launch template", func() {
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			ExpectScheduled(ctx, env.Client, pod)
-			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(Equal(1))
-			input := awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Pop()
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpEndpoint).To(Equal(ec2.LaunchTemplateInstanceMetadataEndpointStateEnabled))
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpProtocolIpv6).To(Equal(ec2.LaunchTemplateInstanceMetadataProtocolIpv6Disabled))
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit).To(Equal(int64(2)))
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpTokens).To(Equal(ec2.LaunchTemplateHttpTokensStateRequired))
+			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(BeNumerically(">=", 1))
+			awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpEndpoint).To(Equal(ec2.LaunchTemplateInstanceMetadataEndpointStateEnabled))
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpProtocolIpv6).To(Equal(ec2.LaunchTemplateInstanceMetadataProtocolIpv6Disabled))
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit).To(Equal(int64(2)))
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpTokens).To(Equal(ec2.LaunchTemplateHttpTokensStateRequired))
+			})
 		})
 		It("should set metadata options on generated launch template from provisioner configuration", func() {
 			nodeTemplate.Spec.MetadataOptions = &v1alpha1.MetadataOptions{
@@ -1157,14 +1565,15 @@ var _ = Describe("Instance Types", func() {
 			}
 			ExpectApplied(ctx, env.Client, provisioner, nodeTemplate)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			ExpectScheduled(ctx, env.Client, pod)
-			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(Equal(1))
-			input := awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Pop()
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpEndpoint).To(Equal(ec2.LaunchTemplateInstanceMetadataEndpointStateDisabled))
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpProtocolIpv6).To(Equal(ec2.LaunchTemplateInstanceMetadataProtocolIpv6Enabled))
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit).To(Equal(int64(1)))
-			Expect(*input.LaunchTemplateData.MetadataOptions.HttpTokens).To(Equal(ec2.LaunchTemplateHttpTokensStateOptional))
+			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(BeNumerically(">=", 1))
+			awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpEndpoint).To(Equal(ec2.LaunchTemplateInstanceMetadataEndpointStateDisabled))
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpProtocolIpv6).To(Equal(ec2.LaunchTemplateInstanceMetadataProtocolIpv6Enabled))
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit).To(Equal(int64(1)))
+				Expect(*ltInput.LaunchTemplateData.MetadataOptions.HttpTokens).To(Equal(ec2.LaunchTemplateHttpTokensStateOptional))
+			})
 		})
 	})
 })
@@ -1179,13 +1588,14 @@ func generateSpotPricing(cp *cloudprovider.CloudProvider, prov *v1alpha5.Provisi
 	t := fakeClock.Now()
 
 	for _, it := range instanceTypes {
+		instanceType := it
 		onDemandPrice := 1.00
 		for _, o := range it.Offerings {
 			if o.CapacityType == v1alpha5.CapacityTypeOnDemand {
 				onDemandPrice = o.Price
 			}
 		}
-		for _, o := range it.Offerings {
+		for _, o := range instanceType.Offerings {
 			o := o
 			if o.CapacityType != v1alpha5.CapacityTypeSpot {
 				continue
@@ -1193,7 +1603,7 @@ func generateSpotPricing(cp *cloudprovider.CloudProvider, prov *v1alpha5.Provisi
 			spotPrice := fmt.Sprintf("%0.3f", onDemandPrice*0.5)
 			rsp.SpotPriceHistory = append(rsp.SpotPriceHistory, &ec2.SpotPrice{
 				AvailabilityZone: &o.Zone,
-				InstanceType:     &it.Name,
+				InstanceType:     &instanceType.Name,
 				SpotPrice:        &spotPrice,
 				Timestamp:        &t,
 			})
@@ -1207,7 +1617,7 @@ func makeFakeInstances() []*ec2.InstanceTypeInfo {
 	ctx := settings.ToContext(context.Background(), &settings.Settings{IsolatedVPC: true})
 	// Use keys from the static pricing data so that we guarantee pricing for the data
 	// Create uniform instance data so all of them schedule for a given pod
-	for _, it := range pricing.NewProvider(ctx, nil, nil, "us-east-1", nil).InstanceTypes() {
+	for _, it := range pricing.NewProvider(ctx, nil, nil, "us-east-1").InstanceTypes() {
 		instanceTypes = append(instanceTypes, &ec2.InstanceTypeInfo{
 			InstanceType: aws.String(it),
 			ProcessorInfo: &ec2.ProcessorInfo{
@@ -1221,8 +1631,12 @@ func makeFakeInstances() []*ec2.InstanceTypeInfo {
 				SizeInMiB: aws.Int64(8192),
 			},
 			NetworkInfo: &ec2.NetworkInfo{
-				MaximumNetworkInterfaces:  aws.Int64(3),
 				Ipv4AddressesPerInterface: aws.Int64(10),
+				DefaultNetworkCardIndex:   aws.Int64(0),
+				NetworkCards: []*ec2.NetworkCardInfo{{
+					NetworkCardIndex:         lo.ToPtr(int64(0)),
+					MaximumNetworkInterfaces: aws.Int64(3),
+				}},
 			},
 			SupportedUsageClasses: fake.DefaultSupportedUsageClasses,
 		})

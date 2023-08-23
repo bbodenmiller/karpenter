@@ -46,7 +46,7 @@ var _ = Describe("SecurityGroups", func() {
 				SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 			},
 		})
-		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name}})
+		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name}})
 		pod := test.Pod()
 
 		env.ExpectCreated(pod, provider, provisioner)
@@ -71,7 +71,7 @@ var _ = Describe("SecurityGroups", func() {
 				SubnetSelector: map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 			},
 		})
-		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name}})
+		provisioner := test.Provisioner(test.ProvisionerOptions{ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name}})
 		pod := test.Pod()
 
 		env.ExpectCreated(pod, provider, provisioner)
@@ -137,7 +137,7 @@ func EventuallyExpectSecurityGroups(provider *v1alpha1.AWSNodeTemplate) {
 			return
 		}
 
-		securityGroupsInStatus := lo.Map(ant.Status.SecurityGroups, func(securitygroup v1alpha1.SecurityGroupStatus, _ int) string {
+		securityGroupsInStatus := lo.Map(ant.Status.SecurityGroups, func(securitygroup v1alpha1.SecurityGroup, _ int) string {
 			return securitygroup.ID
 		})
 

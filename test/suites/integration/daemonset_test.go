@@ -49,7 +49,7 @@ var _ = Describe("DaemonSet", func() {
 			SubnetSelector:        map[string]string{"karpenter.sh/discovery": settings.FromContext(env.Context).ClusterName},
 		}})
 		provisioner = test.Provisioner(test.ProvisionerOptions{
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 			Consolidation: &v1alpha5.Consolidation{
 				Enabled: lo.ToPtr(true),
 			},
@@ -105,7 +105,7 @@ var _ = Describe("DaemonSet", func() {
 		// Eventually expect a single node to exist and both the deployment pod and the daemonset pod to schedule to it
 		Eventually(func(g Gomega) {
 			nodeList := &v1.NodeList{}
-			g.Expect(env.Client.List(env, nodeList, client.HasLabels{"testing.karpenter.sh/test-id"})).To(Succeed())
+			g.Expect(env.Client.List(env, nodeList, client.HasLabels{"testing.karpenter.sh/cluster"})).To(Succeed())
 			g.Expect(nodeList.Items).To(HaveLen(1))
 
 			deploymentPods := env.Monitor.RunningPods(podSelector)
@@ -136,7 +136,7 @@ var _ = Describe("DaemonSet", func() {
 		// Eventually expect a single node to exist and both the deployment pod and the daemonset pod to schedule to it
 		Eventually(func(g Gomega) {
 			nodeList := &v1.NodeList{}
-			g.Expect(env.Client.List(env, nodeList, client.HasLabels{"testing.karpenter.sh/test-id"})).To(Succeed())
+			g.Expect(env.Client.List(env, nodeList, client.HasLabels{"testing.karpenter.sh/cluster"})).To(Succeed())
 			g.Expect(nodeList.Items).To(HaveLen(1))
 
 			deploymentPods := env.Monitor.RunningPods(podSelector)

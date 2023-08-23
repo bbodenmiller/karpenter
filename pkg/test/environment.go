@@ -33,6 +33,8 @@ import (
 	"github.com/aws/karpenter/pkg/providers/subnet"
 
 	coretest "github.com/aws/karpenter-core/pkg/test"
+
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 type Environment struct {
@@ -79,11 +81,11 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 	fakePricingAPI := &fake.PricingAPI{}
 
 	// Providers
-	pricingProvider := pricing.NewProvider(ctx, fakePricingAPI, ec2api, "", make(chan struct{}))
+	pricingProvider := pricing.NewProvider(ctx, fakePricingAPI, ec2api, "")
 	subnetProvider := subnet.NewProvider(ec2api, subnetCache)
 	securityGroupProvider := securitygroup.NewProvider(ec2api, securityGroupCache)
 	amiProvider := amifamily.NewProvider(env.Client, env.KubernetesInterface, ssmapi, ec2api, ssmCache, ec2Cache, kubernetesVersionCache)
-	amiResolver := amifamily.New(env.Client, amiProvider)
+	amiResolver := amifamily.New(amiProvider)
 	instanceTypesProvider := instancetype.NewProvider("", instanceTypeCache, ec2api, subnetProvider, unavailableOfferingsCache, pricingProvider)
 	launchTemplateProvider :=
 		launchtemplate.NewProvider(
@@ -92,6 +94,7 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 			ec2api,
 			amiResolver,
 			securityGroupProvider,
+			subnetProvider,
 			ptr.String("ca-bundle"),
 			make(chan struct{}),
 			net.ParseIP("10.0.100.10"),
@@ -136,6 +139,7 @@ func (env *Environment) Reset() {
 	env.EC2API.Reset()
 	env.SSMAPI.Reset()
 	env.PricingAPI.Reset()
+	env.PricingProvider.Reset()
 
 	env.SSMCache.Flush()
 	env.EC2Cache.Flush()
@@ -145,4 +149,15 @@ func (env *Environment) Reset() {
 	env.LaunchTemplateCache.Flush()
 	env.SubnetCache.Flush()
 	env.SecurityGroupCache.Flush()
+
+	mfs, err := crmetrics.Registry.Gather()
+	if err != nil {
+		for _, mf := range mfs {
+			for _, metric := range mf.GetMetric() {
+				if metric != nil {
+					metric.Reset()
+				}
+			}
+		}
+	}
 }

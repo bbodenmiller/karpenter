@@ -18,9 +18,9 @@ package pricing
 
 import "time"
 
-// generated at 2023-02-27T15:52:29Z for us-east-1
+// generated at 2023-08-21T14:24:21Z for us-east-1
 
-var initialPriceUpdate, _ = time.Parse(time.RFC3339, "2023-02-27T15:52:29Z")
+var initialPriceUpdate, _ = time.Parse(time.RFC3339, "2023-08-21T14:24:21Z")
 var initialOnDemandPrices = map[string]map[string]float64{}
 
 func init() {
@@ -85,8 +85,12 @@ func init() {
 		"c7g.12xlarge": 1.740000, "c7g.16xlarge": 2.320000, "c7g.2xlarge": 0.290000, "c7g.4xlarge": 0.580000,
 		"c7g.8xlarge": 1.160000, "c7g.large": 0.072500, "c7g.medium": 0.036300, "c7g.metal": 2.320000,
 		"c7g.xlarge": 0.145000,
-		// cc2 family
-		"cc2.8xlarge": 2.000000,
+		// c7gd family
+		"c7gd.12xlarge": 2.177300, "c7gd.16xlarge": 2.903000, "c7gd.2xlarge": 0.362900, "c7gd.4xlarge": 0.725800,
+		"c7gd.8xlarge": 1.451500, "c7gd.large": 0.090700, "c7gd.medium": 0.045400, "c7gd.xlarge": 0.181400,
+		// c7gn family
+		"c7gn.12xlarge": 2.995200, "c7gn.16xlarge": 3.993600, "c7gn.2xlarge": 0.499200, "c7gn.4xlarge": 0.998400,
+		"c7gn.8xlarge": 1.996800, "c7gn.large": 0.124800, "c7gn.medium": 0.062400, "c7gn.xlarge": 0.249600,
 		// cr1 family
 		"cr1.8xlarge": 3.500000,
 		// d2 family
@@ -120,8 +124,8 @@ func init() {
 		"g5g.metal": 2.744000, "g5g.xlarge": 0.420000,
 		// h1 family
 		"h1.16xlarge": 3.744000, "h1.2xlarge": 0.468000, "h1.4xlarge": 0.936000, "h1.8xlarge": 1.872000,
-		// hs1 family
-		"hs1.8xlarge": 4.600000,
+		// hpc7g family
+		"hpc7g.16xlarge": 1.683200, "hpc7g.4xlarge": 1.683200, "hpc7g.8xlarge": 1.683200,
 		// i2 family
 		"i2.2xlarge": 1.705000, "i2.4xlarge": 3.410000, "i2.8xlarge": 6.820000, "i2.xlarge": 0.853000,
 		// i3 family
@@ -130,6 +134,9 @@ func init() {
 		// i3en family
 		"i3en.12xlarge": 5.424000, "i3en.24xlarge": 10.848000, "i3en.2xlarge": 0.904000, "i3en.3xlarge": 1.356000,
 		"i3en.6xlarge": 2.712000, "i3en.large": 0.226000, "i3en.metal": 10.848000, "i3en.xlarge": 0.452000,
+		// i4g family
+		"i4g.16xlarge": 4.942080, "i4g.2xlarge": 0.617760, "i4g.4xlarge": 1.235520, "i4g.8xlarge": 2.471040,
+		"i4g.large": 0.154440, "i4g.xlarge": 0.308880,
 		// i4i family
 		"i4i.16xlarge": 5.491000, "i4i.2xlarge": 0.686000, "i4i.32xlarge": 10.982400, "i4i.4xlarge": 1.373000,
 		"i4i.8xlarge": 2.746000, "i4i.large": 0.172000, "i4i.metal": 10.982000, "i4i.xlarge": 0.343000,
@@ -138,6 +145,8 @@ func init() {
 		"im4gn.large": 0.181900, "im4gn.xlarge": 0.363790,
 		// inf1 family
 		"inf1.24xlarge": 4.721000, "inf1.2xlarge": 0.362000, "inf1.6xlarge": 1.180000, "inf1.xlarge": 0.228000,
+		// inf2 family
+		"inf2.24xlarge": 6.490630, "inf2.48xlarge": 12.981270, "inf2.8xlarge": 1.967860, "inf2.xlarge": 0.758200,
 		// is4gen family
 		"is4gen.2xlarge": 1.152600, "is4gen.4xlarge": 2.305200, "is4gen.8xlarge": 4.610400,
 		"is4gen.large": 0.288150, "is4gen.medium": 0.144080, "is4gen.xlarge": 0.576300,
@@ -203,10 +212,24 @@ func init() {
 		"m6in.12xlarge": 3.341520, "m6in.16xlarge": 4.455360, "m6in.24xlarge": 6.683040, "m6in.2xlarge": 0.556920,
 		"m6in.32xlarge": 8.910720, "m6in.4xlarge": 1.113840, "m6in.8xlarge": 2.227680, "m6in.large": 0.139230,
 		"m6in.metal": 8.910720, "m6in.xlarge": 0.278460,
+		// m7a family
+		"m7a.12xlarge": 2.782080, "m7a.16xlarge": 3.709440, "m7a.24xlarge": 5.564160, "m7a.2xlarge": 0.463680,
+		"m7a.32xlarge": 7.418880, "m7a.48xlarge": 11.128320, "m7a.4xlarge": 0.927360, "m7a.8xlarge": 1.854720,
+		"m7a.large": 0.115920, "m7a.medium": 0.057960, "m7a.metal-48xl": 11.128320, "m7a.xlarge": 0.231840,
 		// m7g family
 		"m7g.12xlarge": 1.958400, "m7g.16xlarge": 2.611200, "m7g.2xlarge": 0.326400, "m7g.4xlarge": 0.652800,
 		"m7g.8xlarge": 1.305600, "m7g.large": 0.081600, "m7g.medium": 0.040800, "m7g.metal": 2.611200,
 		"m7g.xlarge": 0.163200,
+		// m7gd family
+		"m7gd.12xlarge": 2.562800, "m7gd.16xlarge": 3.417100, "m7gd.2xlarge": 0.427100, "m7gd.4xlarge": 0.854300,
+		"m7gd.8xlarge": 1.708600, "m7gd.large": 0.106800, "m7gd.medium": 0.053400, "m7gd.xlarge": 0.213600,
+		// m7i-flex family
+		"m7i-flex.2xlarge": 0.383040, "m7i-flex.4xlarge": 0.766080, "m7i-flex.8xlarge": 1.532160,
+		"m7i-flex.large": 0.095760, "m7i-flex.xlarge": 0.191520,
+		// m7i family
+		"m7i.12xlarge": 2.419200, "m7i.16xlarge": 3.225600, "m7i.24xlarge": 4.838400, "m7i.2xlarge": 0.403200,
+		"m7i.48xlarge": 9.676800, "m7i.4xlarge": 0.806400, "m7i.8xlarge": 1.612800, "m7i.large": 0.100800,
+		"m7i.xlarge": 0.201600,
 		// p2 family
 		"p2.16xlarge": 14.400000, "p2.8xlarge": 7.200000, "p2.xlarge": 0.900000,
 		// p3 family
@@ -217,6 +240,8 @@ func init() {
 		"p4d.24xlarge": 32.772600,
 		// p4de family
 		"p4de.24xlarge": 40.965750,
+		// p5 family
+		"p5.48xlarge": 98.320000,
 		// r3 family
 		"r3.2xlarge": 0.665000, "r3.4xlarge": 1.330000, "r3.8xlarge": 2.660000, "r3.large": 0.166000,
 		"r3.xlarge": 0.333000,
@@ -281,6 +306,9 @@ func init() {
 		"r7g.12xlarge": 2.570400, "r7g.16xlarge": 3.427200, "r7g.2xlarge": 0.428400, "r7g.4xlarge": 0.856800,
 		"r7g.8xlarge": 1.713600, "r7g.large": 0.107100, "r7g.medium": 0.053600, "r7g.metal": 3.427200,
 		"r7g.xlarge": 0.214200,
+		// r7gd family
+		"r7gd.12xlarge": 3.265900, "r7gd.16xlarge": 4.354600, "r7gd.2xlarge": 0.544300, "r7gd.4xlarge": 1.088600,
+		"r7gd.8xlarge": 2.177300, "r7gd.large": 0.136100, "r7gd.medium": 0.068000, "r7gd.xlarge": 0.272200,
 		// t1 family
 		"t1.micro": 0.020000,
 		// t2 family
@@ -297,6 +325,8 @@ func init() {
 		"t4g.nano": 0.004200, "t4g.small": 0.016800, "t4g.xlarge": 0.134400,
 		// trn1 family
 		"trn1.2xlarge": 1.343750, "trn1.32xlarge": 21.500000,
+		// trn1n family
+		"trn1n.32xlarge": 24.780000,
 		// u-12tb1 family
 		"u-12tb1.112xlarge": 109.200000,
 		// u-18tb1 family
@@ -367,10 +397,14 @@ func init() {
 		"c6i.12xlarge": 2.448000, "c6i.16xlarge": 3.264000, "c6i.24xlarge": 4.896000, "c6i.2xlarge": 0.408000,
 		"c6i.32xlarge": 6.528000, "c6i.4xlarge": 0.816000, "c6i.8xlarge": 1.632000, "c6i.large": 0.102000,
 		"c6i.metal": 6.528000, "c6i.xlarge": 0.204000,
+		// c6id family
+		"c6id.12xlarge": 2.923200, "c6id.16xlarge": 3.897600, "c6id.24xlarge": 5.846400, "c6id.2xlarge": 0.487200,
+		"c6id.32xlarge": 7.795200, "c6id.4xlarge": 0.974400, "c6id.8xlarge": 1.948800, "c6id.large": 0.121800,
+		"c6id.metal": 7.795200, "c6id.xlarge": 0.243600,
 		// c6in family
 		"c6in.12xlarge": 3.276000, "c6in.16xlarge": 4.368000, "c6in.24xlarge": 6.552000, "c6in.2xlarge": 0.546000,
 		"c6in.32xlarge": 8.736000, "c6in.4xlarge": 1.092000, "c6in.8xlarge": 2.184000, "c6in.large": 0.136500,
-		"c6in.xlarge": 0.273000,
+		"c6in.metal": 8.736000, "c6in.xlarge": 0.273000,
 		// cc2 family
 		"cc2.8xlarge": 2.250000,
 		// d2 family
@@ -390,6 +424,9 @@ func init() {
 		"hpc6a.48xlarge": 3.467000,
 		// hpc6id family
 		"hpc6id.32xlarge": 6.854400,
+		// hpc7a family
+		"hpc7a.12xlarge": 8.667400, "hpc7a.24xlarge": 8.667400, "hpc7a.48xlarge": 8.667400,
+		"hpc7a.96xlarge": 8.667400,
 		// hs1 family
 		"hs1.8xlarge": 5.520000,
 		// i2 family
@@ -402,6 +439,9 @@ func init() {
 		"i3en.6xlarge": 3.276000, "i3en.large": 0.273000, "i3en.metal": 13.104000, "i3en.xlarge": 0.546000,
 		// i3p family
 		"i3p.16xlarge": 6.016000,
+		// i4i family
+		"i4i.16xlarge": 6.618000, "i4i.2xlarge": 0.827000, "i4i.32xlarge": 13.235200, "i4i.4xlarge": 1.654000,
+		"i4i.8xlarge": 3.309000, "i4i.large": 0.207000, "i4i.metal": 13.235000, "i4i.xlarge": 0.414000,
 		// inf1 family
 		"inf1.24xlarge": 5.953000, "inf1.2xlarge": 0.456000, "inf1.6xlarge": 1.488000, "inf1.xlarge": 0.288000,
 		// m1 family
@@ -443,14 +483,18 @@ func init() {
 		"m6i.12xlarge": 2.904000, "m6i.16xlarge": 3.872000, "m6i.24xlarge": 5.808000, "m6i.2xlarge": 0.484000,
 		"m6i.32xlarge": 7.744000, "m6i.4xlarge": 0.968000, "m6i.8xlarge": 1.936000, "m6i.large": 0.121000,
 		"m6i.metal": 7.744000, "m6i.xlarge": 0.242000,
+		// m6id family
+		"m6id.12xlarge": 3.604800, "m6id.16xlarge": 4.806400, "m6id.24xlarge": 7.209600, "m6id.2xlarge": 0.600800,
+		"m6id.32xlarge": 9.612800, "m6id.4xlarge": 1.201600, "m6id.8xlarge": 2.403200, "m6id.large": 0.150200,
+		"m6id.metal": 9.612800, "m6id.xlarge": 0.300400,
 		// m6idn family
 		"m6idn.12xlarge": 4.801680, "m6idn.16xlarge": 6.402240, "m6idn.24xlarge": 9.603360,
 		"m6idn.2xlarge": 0.800280, "m6idn.32xlarge": 12.804480, "m6idn.4xlarge": 1.600560, "m6idn.8xlarge": 3.201120,
-		"m6idn.large": 0.200070, "m6idn.xlarge": 0.400140,
+		"m6idn.large": 0.200070, "m6idn.metal": 12.804480, "m6idn.xlarge": 0.400140,
 		// m6in family
 		"m6in.12xlarge": 4.183920, "m6in.16xlarge": 5.578560, "m6in.24xlarge": 8.367840, "m6in.2xlarge": 0.697320,
 		"m6in.32xlarge": 11.157120, "m6in.4xlarge": 1.394640, "m6in.8xlarge": 2.789280, "m6in.large": 0.174330,
-		"m6in.xlarge": 0.348660,
+		"m6in.metal": 11.157120, "m6in.xlarge": 0.348660,
 		// p2 family
 		"p2.16xlarge": 17.280000, "p2.8xlarge": 8.640000, "p2.xlarge": 1.080000,
 		// p3 family
@@ -495,14 +539,18 @@ func init() {
 		"r6i.12xlarge": 3.624000, "r6i.16xlarge": 4.832000, "r6i.24xlarge": 7.248000, "r6i.2xlarge": 0.604000,
 		"r6i.32xlarge": 9.664000, "r6i.4xlarge": 1.208000, "r6i.8xlarge": 2.416000, "r6i.large": 0.151000,
 		"r6i.metal": 9.664000, "r6i.xlarge": 0.302000,
+		// r6id family
+		"r6id.12xlarge": 4.360800, "r6id.16xlarge": 5.814400, "r6id.24xlarge": 8.721600, "r6id.2xlarge": 0.726800,
+		"r6id.32xlarge": 11.628800, "r6id.4xlarge": 1.453600, "r6id.8xlarge": 2.907200, "r6id.large": 0.181700,
+		"r6id.metal": 11.628800, "r6id.xlarge": 0.363400,
 		// r6idn family
 		"r6idn.12xlarge": 5.644080, "r6idn.16xlarge": 7.525440, "r6idn.24xlarge": 11.288160,
 		"r6idn.2xlarge": 0.940680, "r6idn.32xlarge": 15.050880, "r6idn.4xlarge": 1.881360, "r6idn.8xlarge": 3.762720,
-		"r6idn.large": 0.235170, "r6idn.xlarge": 0.470340,
+		"r6idn.large": 0.235170, "r6idn.metal": 15.050880, "r6idn.xlarge": 0.470340,
 		// r6in family
 		"r6in.12xlarge": 5.026320, "r6in.16xlarge": 6.701760, "r6in.24xlarge": 10.052640, "r6in.2xlarge": 0.837720,
 		"r6in.32xlarge": 13.403520, "r6in.4xlarge": 1.675440, "r6in.8xlarge": 3.350880, "r6in.large": 0.209430,
-		"r6in.xlarge": 0.418860,
+		"r6in.metal": 13.403520, "r6in.xlarge": 0.418860,
 		// t1 family
 		"t1.micro": 0.024000,
 		// t2 family
@@ -521,6 +569,8 @@ func init() {
 		"u-12tb1.112xlarge": 130.867000,
 		// u-24tb1 family
 		"u-24tb1.112xlarge": 261.730000,
+		// u-3tb1 family
+		"u-3tb1.56xlarge": 32.716500,
 		// u-6tb1 family
 		"u-6tb1.112xlarge": 65.433000, "u-6tb1.56xlarge": 55.610750,
 		// u-9tb1 family
@@ -562,6 +612,10 @@ func init() {
 		"c6i.12xlarge": 2.448000, "c6i.16xlarge": 3.264000, "c6i.24xlarge": 4.896000, "c6i.2xlarge": 0.408000,
 		"c6i.32xlarge": 6.528000, "c6i.4xlarge": 0.816000, "c6i.8xlarge": 1.632000, "c6i.large": 0.102000,
 		"c6i.metal": 6.528000, "c6i.xlarge": 0.204000,
+		// c6in family
+		"c6in.12xlarge": 3.276000, "c6in.16xlarge": 4.368000, "c6in.24xlarge": 6.552000, "c6in.2xlarge": 0.546000,
+		"c6in.32xlarge": 8.736000, "c6in.4xlarge": 1.092000, "c6in.8xlarge": 2.184000, "c6in.large": 0.136500,
+		"c6in.metal": 8.736000, "c6in.xlarge": 0.273000,
 		// d2 family
 		"d2.2xlarge": 1.656000, "d2.4xlarge": 3.312000, "d2.8xlarge": 6.624000, "d2.xlarge": 0.828000,
 		// g4dn family
@@ -575,6 +629,9 @@ func init() {
 		// i3en family
 		"i3en.12xlarge": 6.552000, "i3en.24xlarge": 13.104000, "i3en.2xlarge": 1.092000, "i3en.3xlarge": 1.638000,
 		"i3en.6xlarge": 3.276000, "i3en.large": 0.273000, "i3en.metal": 13.104000, "i3en.xlarge": 0.546000,
+		// i4i family
+		"i4i.16xlarge": 6.618000, "i4i.2xlarge": 0.827000, "i4i.32xlarge": 13.235200, "i4i.4xlarge": 1.654000,
+		"i4i.8xlarge": 3.309000, "i4i.large": 0.207000, "i4i.metal": 13.235000, "i4i.xlarge": 0.414000,
 		// inf1 family
 		"inf1.24xlarge": 5.953000, "inf1.2xlarge": 0.456000, "inf1.6xlarge": 1.488000, "inf1.xlarge": 0.288000,
 		// m5 family
@@ -648,6 +705,8 @@ func init() {
 		"u-24tb1.112xlarge": 261.730000,
 		// u-6tb1 family
 		"u-6tb1.112xlarge": 65.433000, "u-6tb1.56xlarge": 55.610750,
+		// u-9tb1 family
+		"u-9tb1.112xlarge": 98.150000,
 		// x1 family
 		"x1.16xlarge": 8.003000, "x1.32xlarge": 16.006000,
 		// x1e family

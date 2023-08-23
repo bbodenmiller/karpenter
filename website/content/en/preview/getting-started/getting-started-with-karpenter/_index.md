@@ -79,10 +79,26 @@ The following cluster configuration will:
 
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step06-add-spot-role.sh" language="bash"%}}
 
+{{% alert title="Windows Support Notice" color="warning" %}}
+In order to run Windows workloads, Windows support should be enabled in your EKS Cluster.
+See [Enabling Windows support](https://docs.aws.amazon.com/eks/latest/userguide/windows-support.html#enable-windows-support) to learn more.
+{{% /alert %}}
+
+### 4. Install Karpenter
+
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step08-apply-helm-chart.sh" language="bash"%}}
 
+{{% alert title="Warning" color="warning" %}}
+Karpenter creates a mapping between CloudProvider machines and CustomResources in the cluster for capacity tracking. To ensure this mapping is consistent, Karpenter utilizes the following tag keys:
 
-### 4. Create Provisioner
+* `karpenter.sh/managed-by`
+* `karpenter.sh/provisioner-name`
+* `kubernetes.io/cluster/${CLUSTER_NAME}`
+
+Because Karpenter takes this dependency, any user that has the ability to Create/Delete these tags on CloudProvider machines will have the ability to orchestrate Karpenter to Create/Delete CloudProvider machines as a side effect. We recommend that you [enforce tag-based IAM policies](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_tags.html) on these tags against any EC2 instance resource (`i-*`) for any users that might have [CreateTags](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateTags.html)/[DeleteTags](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DeleteTags.html) permissions but should not have [RunInstances](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_RunInstances.html)/[TerminateInstances](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_TerminateInstances.html) permissions.
+{{% /alert %}}
+
+### 5. Create Provisioner
 
 A single Karpenter provisioner is capable of handling many different pod
 shapes. Karpenter makes scheduling and provisioning decisions based on pod
@@ -94,8 +110,7 @@ This provisioner uses `securityGroupSelector` and `subnetSelector` to discover r
 We applied the tag `karpenter.sh/discovery` in the `eksctl` command above.
 Depending how these resources are shared between clusters, you may need to use different tagging schemes.
 
-The `ttlSecondsAfterEmpty` value configures Karpenter to terminate empty nodes.
-This behavior can be disabled by leaving the value undefined.
+The `consolidation` value configures Karpenter to reduce cluster cost by removing and replacing nodes. As a result, consolidation will terminate any empty nodes on the cluster. This behavior can be disabled by leaving the value undefined or setting `consolidation.enabled` to `false`. Review the [provisioner CRD]({{<ref "../../concepts/provisioners" >}}) for more information.
 
 Review the [provisioner CRD]({{<ref "../../concepts/provisioners" >}}) for more information. For example,
 `ttlSecondsUntilExpired` configures Karpenter to terminate nodes when a maximum age is reached.
@@ -118,8 +133,7 @@ This deployment uses the [pause image](https://www.ianlewis.org/en/almighty-paus
 
 ### Scale down deployment
 
-Now, delete the deployment. After 30 seconds (`ttlSecondsAfterEmpty`),
-Karpenter should terminate the now empty nodes.
+Now, delete the deployment. After a short amount of time, Karpenter should terminate the empty nodes due to consolidation.
 
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step14-deprovisioning.sh" language="bash"%}}
 
@@ -127,7 +141,7 @@ Karpenter should terminate the now empty nodes.
 
 This section describes optional ways to configure Karpenter to enhance its capabilities.
 In particular, the following commands deploy a Prometheus and Grafana stack that is suitable for this guide but does not include persistent storage or other configurations that would be necessary for monitoring a production deployment of Karpenter.
-This deployment includes two Karpenter dashboards that are automatically onboarded to Grafana.They provide a variety of visualization examples on Karpenter metrics.
+This deployment includes two Karpenter dashboards that are automatically onboarded to Grafana. They provide a variety of visualization examples on Karpenter metrics.
 
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step09-add-prometheus-grafana.sh" language="bash"%}}
 

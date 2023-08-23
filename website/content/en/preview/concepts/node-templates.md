@@ -37,8 +37,10 @@ spec:
 status:
   subnets: { ... }               # resolved subnets
   securityGroups: { ... }        # resolved security groups
+  amis: { ... }                  # resolved AMIs 
 ```
-Refer to the [Provisioner docs]({{<ref "./provisioners" >}}) for settings applicable to all providers.
+Refer to the [Provisioner docs]({{<ref "./provisioners" >}}) for settings applicable to all providers. To explore various `AWSNodeTemplate` configurations, refer to the examples provided [in the Karpenter Github repository](https://github.com/aws/karpenter/blob/main/examples/provisioner/).
+
 See below for other AWS provider-specific parameters.
 
 ## spec.subnetSelector
@@ -95,25 +97,32 @@ EKS creates at least two security groups by default, [review the documentation](
 Security groups may be specified by any AWS tag, including "Name". Selecting tags using wildcards (`*`) is supported.
 
 {{% alert title="Note" color="primary" %}}
-When launching nodes, Karpenter uses all the security groups that match the selector. If multiple security groups have the tag `kubernetes.io/cluster/MyClusterName`, this may result in failures using the AWS Load Balancer controller. The Load Balancer controller only supports a single security group having that tag key. See [this issue](https://github.com/kubernetes-sigs/aws-load-balancer-controller/issues/2367) for more details.
+When launching nodes, Karpenter uses all the security groups that match the selector. If you choose to use the `kubernetes.io/cluster/$CLUSTER_NAME` tag for discovery, note that this may result in failures using the AWS Load Balancer controller. The Load Balancer controller only supports a single security group having that tag key. See [this issue](https://github.com/kubernetes-sigs/aws-load-balancer-controller/issues/2367) for more details.
 {{% /alert %}}
 
 To verify if this restriction affects you, run the following commands.
 ```bash
 CLUSTER_VPC_ID="$(aws eks describe-cluster --name $CLUSTER_NAME --query cluster.resourcesVpcConfig.vpcId --output text)"
 
-aws ec2 describe-security-groups --filters Name=vpc-id,Values=$CLUSTER_VPC_ID Name=tag-key,Values=karpenter.sh/discovery/$CLUSTER_NAME --query 'SecurityGroups[].[GroupName]' --output text
+aws ec2 describe-security-groups --filters Name=vpc-id,Values=$CLUSTER_VPC_ID Name=tag-key,Values=kubernetes.io/cluster/$CLUSTER_NAME --query 'SecurityGroups[].[GroupName]' --output text
 ```
 
-If multiple securityGroups are printed, you will need a more specific securityGroupSelector.
+If multiple securityGroups are printed, you will need a more specific securityGroupSelector. We generally recommend that you use the `karpenter.sh/discovery: $CLUSTER_NAME` tag selector instead.
 
 **Examples**
+
+Select all assigned to a cluster:
+```yaml
+spec:
+  securityGroupSelector:
+    karpenter.sh/discovery: "${CLUSTER_NAME}"
+```
 
 Select all with a specified tag key:
 ```yaml
 spec:
   securityGroupSelector:
-    karpenter.sh/discovery/MyClusterName: '*'
+    MyTag: '*'
 ```
 
 Select by name and tag (all criteria must match):
@@ -160,18 +169,22 @@ spec:
 
 The AMI used when provisioning nodes can be controlled by the `amiFamily` field. Based on the value set for `amiFamily`, Karpenter will automatically query for the appropriate [EKS optimized AMI](https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-amis.html) via AWS Systems Manager (SSM). When an `amiFamily` of `Custom` is chosen, then an `amiSelector` must be specified that informs Karpenter on which custom AMIs are to be used.
 
-Currently, Karpenter supports `amiFamily` values `AL2`, `Bottlerocket`, `Ubuntu` and `Custom`. GPUs are only supported with `AL2` and `Bottlerocket`.
+Currently, Karpenter supports `amiFamily` values `AL2`, `Bottlerocket`, `Ubuntu`, `Windows2019`, `Windows2022` and `Custom`. GPUs are only supported with `AL2` and `Bottlerocket`. The `AL2` amiFamily does not support ARM64 GPU instance types unless you specify a custom amiSelector.
+
+{{% alert title="Defaults" color="secondary" %}}
+If no `amiFamily` is defined, Karpenter will set the default `amiFamily` to AL2
 
 ```yaml
 spec:
-  amiFamily: Bottlerocket
+  amiFamily: AL2
 ```
+{{% /alert %}}
 
 ## spec.amiSelector
 
 AMISelector is used to configure custom AMIs for Karpenter to use, where the AMIs are discovered through `aws::` prefixed filters (`aws::ids`, `aws::owners` and `aws::name`) and [AWS tags](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Tags.html). This field is optional, and Karpenter will use the latest EKS-optimized AMIs if an amiSelector is not specified.
 
-To select an AMI by name, use `aws::name`. EC2 AMIs may be specified by any AWS tag, including `Name`. Selecting tag values using wildcards (`*`) is supported.
+To select an AMI by name, use `aws::name`. EC2 AMIs may be specified by any AWS tag, including `Name`. Selecting by tag or by name using wildcards (`*`) is supported.
 
 EC2 AMI IDs may be specified by using the key `aws::ids` (`aws-ids` is also supported) and then passing the IDs as a comma-separated string value.
 
@@ -191,7 +204,7 @@ If an `amiSelector` matches more than one AMI, Karpenter will automatically dete
 
 If you need to express other constraints for an AMI beyond architecture, you can express these constraints as tags on the AMI. For example, if you want to limit an EC2 AMI to only be used with instanceTypes that have an `nvidia` GPU, you can specify an EC2 tag with a key of `karpenter.k8s.aws/instance-gpu-manufacturer` and value `nvidia` on that AMI.
 
-All labels defined [in the scheduling documentation](./scheduling#supported-labels) can be used as requirements for an EC2 AMI.
+All labels defined [in the scheduling documentation](../scheduling#well-known-labels) can be used as requirements for an EC2 AMI.
 
 ```bash
 > aws ec2 describe-images --image-id ami-123 --query Images[0].Tags
@@ -219,10 +232,22 @@ Select all AMIs with a specified tag:
     karpenter.sh/discovery/MyClusterName: '*'
 ```
 
-Select AMIs by name:
+Select AMIs by the AMI name:
+```yaml
+  amiSelector:
+    aws::name: my-ami
+```
+Select AMIs by the Name tag:
 ```yaml
   amiSelector:
     Name: my-ami
+```
+
+Select AMIs by name and a specific owner:
+```yaml
+  amiSelector:
+    aws::name: my-ami
+    aws::owners: self/ownerAccountID
 ```
 
 Select AMIs by an arbitrary AWS tag key/value pair:
@@ -234,7 +259,7 @@ Select AMIs by an arbitrary AWS tag key/value pair:
 Specify AMIs explicitly by ID:
 ```yaml
   amiSelector:
-    aws-ids: "ami-123,ami-456"
+    aws::ids: "ami-123,ami-456"
 ```
 
 ## spec.tags
@@ -247,7 +272,7 @@ karpenter.sh/provisioner-name: <provisioner-name>
 kubernetes.io/cluster/<cluster-name>: owned
 ```
 
-Additional tags can be added in the AWSNodeTemplate tags section which are merged with global tags in `aws.tags` (located in karpenter-global-settings ConfigMap) and can override the default tag values.
+Additional tags can be added in the AWSNodeTemplate tags section which are merged with global tags in `aws.tags` (located in karpenter-global-settings ConfigMap).
 ```yaml
 spec:
   tags:
@@ -255,6 +280,8 @@ spec:
     dev.corp.net/app: Calculator
     dev.corp.net/team: MyTeam
 ```
+
+Karpenter allows overrides of the default "Name" tag but does not allow overrides to restricted domains (such as "karpenter.sh", "karpenter.k8s.aws", and "kubernetes.io/cluster"). This ensures that Karpenter is able to correctly auto-discover machines that it owns.
 
 ## spec.metadataOptions
 
@@ -298,10 +325,10 @@ spec:
         snapshotID: snap-0123456789
 ```
 
-### Defaults
+{{% alert title="Defaults" color="secondary" %}}
+If no `blockDeviceMappings` is defined, Karpenter will set the default `blockDeviceMappings` to the following for the given AMI family.
 
 #### AL2
-
 ```yaml
 apiVersion: karpenter.k8s.aws/v1alpha1
 kind: AWSNodeTemplate
@@ -315,7 +342,6 @@ spec:
 ```
 
 #### Bottlerocket
-
 ```yaml
 apiVersion: karpenter.k8s.aws/v1alpha1
 kind: AWSNodeTemplate
@@ -336,7 +362,6 @@ spec:
 ```
 
 #### Ubuntu
-
 ```yaml
 apiVersion: karpenter.k8s.aws/v1alpha1
 kind: AWSNodeTemplate
@@ -348,6 +373,20 @@ spec:
         volumeType: gp3
         encrypted: true
 ```
+
+#### Windows2019, Windows2022
+```yaml
+apiVersion: karpenter.k8s.aws/v1alpha1
+kind: AWSNodeTemplate
+spec:
+  blockDeviceMappings:
+    - deviceName: /dev/sda1
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        encrypted: true
+```
+{{% /alert %}}
 
 ## spec.userData
 
@@ -429,7 +468,7 @@ Your UserData -
 [settings.kubernetes]
 "unknown-setting" = "unknown"
 [settings.kubernetes.node-labels]
-'field.controlled.by/karpenter': 'will-be-overridden'
+'field.controlled.by/karpenter' = 'will-be-overridden'
 ```
 
 Final merged UserData -
@@ -522,6 +561,28 @@ spec:
     echo "$(jq '.kubeAPIQPS=50' /etc/kubernetes/kubelet/kubelet-config.json)" > /etc/kubernetes/kubelet/kubelet-config.json
 ```
 
+#### Windows
+
+* Your UserData must be specified as PowerShell commands.
+* The UserData specified will be prepended to a Karpenter managed section that will bootstrap the kubelet.
+* Karpenter will continue to set ClusterDNS and all other parameters defined in spec.kubeletConfiguration as before.
+
+Consider the following example to understand how your custom UserData settings will be merged in.
+
+Your UserData -
+```
+Write-Host "Running custom user data script"
+```
+
+Final merged UserData -
+```
+<powershell>
+Write-Host "Running custom user data script"
+[string]$EKSBootstrapScriptFile = "$env:ProgramFiles\Amazon\EKS\Start-EKSBootstrap.ps1"
+& $EKSBootstrapScriptFile -EKSClusterName 'test-cluster' -APIServerEndpoint 'https://test-cluster' -Base64ClusterCA 'ca-bundle' -KubeletExtraArgs '--node-labels="karpenter.sh/capacity-type=spot,karpenter.sh/provisioner-name=windows2022,testing.karpenter.sh/test-id=unspecified" --max-pods=110' -DNSClusterIP '10.0.100.10'
+</powershell>
+```
+
 ## spec.detailedMonitoring
 
 Enabling detailed monitoring on the node template controls the [EC2 detailed monitoring](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-cloudwatch-new.html) feature. If you enable this option, the Amazon EC2 console displays monitoring graphs with a 1-minute period for the instances that Karpenter launches.
@@ -553,7 +614,7 @@ status:
 ```
 
 ## status.securityGroups
-`status.securityGroups` contains the `id` of the security groups utilized during node launch.
+`status.securityGroups` contains the `id` and `name` of the security groups utilized during node launch.
 
 **Examples**
 
@@ -561,5 +622,52 @@ status:
   status:
     securityGroups:
     - id: sg-041513b454818610b
+      name: ClusterSharedNodeSecurityGroup
     - id: sg-0286715698b894bca
+      name: ControlPlaneSecurityGroup-1AQ073TSAAPW
+```
+
+## status.amis
+`status.amis` contains the `id`, `name`, and `requirements` of the amis utilized during node launch.
+
+**Examples**
+
+```yaml
+  amis:
+      - id: ami-03c3a3dcda64f5b75
+        name: amazon-linux-2-gpu
+        requirements:
+      - key: kubernetes.io/arch
+        operator: In
+        values:
+        - amd64
+      - key: karpenter.k8s.aws/instance-accelerator-manufacturer
+        operator: In
+        values:
+        - aws
+        - nvidia
+    - id: ami-06afb2d101cc4b8bd
+      name: amazon-linux-2-arm64
+      requirements:
+      - key: kubernetes.io/arch
+        operator: In
+        values:
+        - arm64
+      - key: karpenter.k8s.aws/instance-accelerator-manufacturer
+        operator: NotIn
+        values:
+        - aws
+        - nvidia
+    - id: ami-0e28b76d768af234e
+      name: amazon-linux-2
+      requirements:
+      - key: kubernetes.io/arch
+        operator: In
+        values:
+        - amd64
+      - key: karpenter.k8s.aws/instance-accelerator-manufacturer
+        operator: NotIn
+        values:
+        - aws
+        - nvidia
 ```

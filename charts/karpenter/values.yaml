@@ -64,7 +64,7 @@ dnsConfig: {}
 # -- Node selectors to schedule the pod to nodes with labels.
 nodeSelector:
   kubernetes.io/os: linux
-# -- Affinity rules for scheduling the pod.
+# -- Affinity rules for scheduling the pod. If an explicit label selector is not provided for pod affinity or pod anti-affinity one will be created from the pod selector labels.
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -74,14 +74,8 @@ affinity:
               operator: DoesNotExist
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchExpressions:
-            - key: app.kubernetes.io/instance
-              operator: In
-              values:
-                - "{{ .Release.Name }}"
-        topologyKey: "kubernetes.io/hostname"
-# -- topologySpreadConstraints to increase the controller resilience
+      - topologyKey: "kubernetes.io/hostname"
+# -- Topology spread constraints to increase the controller resilience by distributing pods across the cluster zones. If an explicit label selector is not provided one will be created from the pod selector labels.
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: topology.kubernetes.io/zone
@@ -100,27 +94,14 @@ extraVolumes: []
 #         audience: sts.amazonaws.com
 #         expirationSeconds: 86400
 #         path: token
-
-# -- Array of extra K8s manifests to deploy
-extraObjects: []
-#- apiVersion: karpenter.k8s.aws/v1alpha1
-#  kind: AWSNodeTemplate
-#  metadata:
-#    name: default
-#  spec:
-#    subnetSelector:
-#      karpenter.sh/discovery: {CLUSTER_NAME}
-#    securityGroupSelector:
-#      karpenter.sh/discovery: {CLUSTER_NAME}
-
 controller:
   image:
     # -- Repository path to the controller image.
     repository: public.ecr.aws/karpenter/controller
     # -- Tag of the controller image.
-    tag: v0.27.0
+    tag: v0.30.0-rc.0
     # -- SHA256 digest of the controller image.
-    digest: sha256:db45f56bf4730b77a38e39f097edce4ddba899b83981511bc0f227ba270d744e
+    digest: sha256:06f08a2c9b5125a2da57936a5ccfb54e5796677e247fb0bb960e70e79242a147
   # -- SecurityContext for the controller container.
   securityContext: {}
   # -- Additional environment variables for the controller pod.
@@ -162,7 +143,7 @@ controller:
   sidecarVolumeMounts: []
   metrics:
     # -- The container port to use for metrics.
-    port: 8080
+    port: 8000
   healthProbe:
     # -- The container port to use for http health probe.
     port: 8081
@@ -172,7 +153,7 @@ webhook:
   port: 8443
 # -- Global log level
 logLevel: debug
-# -- Gloabl log encoding
+# -- Global log encoding
 logEncoding: console
 # -- Global Settings to configure Karpenter
 settings:
@@ -185,6 +166,12 @@ settings:
   batchIdleDuration: 1s
   # -- AWS-specific configuration values
   aws:
+    # -- Role to assume for calling AWS services.
+    assumeRoleARN: ""
+    # -- Duration of assumed credentials in minutes. Default value is 15 minutes. Not used unless aws.assumeRoleARN set.
+    assumeRoleDuration: 15m
+    # -- Cluster CA bundle for TLS configuration of provisioned nodes. If not set, this is taken from the controller's TLS configuration for the API server.
+    clusterCABundle: ""
     # -- Cluster name.
     clusterName: ""
     # -- Cluster endpoint. If not set, will be discovered during startup (EKS only)
@@ -199,8 +186,6 @@ settings:
     # -- If true then assume we can't reach AWS services which don't have a VPC endpoint
     # This also has the effect of disabling look-ups to the AWS pricing endpoint
     isolatedVPC: false
-    # -- The node naming convention (either "ip-name" or "resource-name")
-    nodeNameConvention: "ip-name"
     # -- The VM memory overhead as a percent that will be subtracted from the total memory for all instance types
     vmMemoryOverheadPercent: 0.075
     # -- interruptionQueueName is disabled if not specified. Enabling interruption handling may

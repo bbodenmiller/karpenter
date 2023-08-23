@@ -15,27 +15,50 @@ limitations under the License.
 package controllers
 
 import (
-	"github.com/aws/aws-sdk-go/service/sqs"
-	"knative.dev/pkg/logging"
+	"context"
 
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/sqs"
+	"k8s.io/utils/clock"
+	"knative.dev/pkg/logging"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/aws/karpenter-core/pkg/events"
 	"github.com/aws/karpenter/pkg/apis/settings"
+	"github.com/aws/karpenter/pkg/cache"
 	"github.com/aws/karpenter/pkg/cloudprovider"
-	awscontext "github.com/aws/karpenter/pkg/context"
 	"github.com/aws/karpenter/pkg/controllers/interruption"
+	machinegarbagecollection "github.com/aws/karpenter/pkg/controllers/machine/garbagecollection"
+	machinelink "github.com/aws/karpenter/pkg/controllers/machine/link"
 	"github.com/aws/karpenter/pkg/controllers/nodetemplate"
+	"github.com/aws/karpenter/pkg/providers/amifamily"
+	"github.com/aws/karpenter/pkg/providers/pricing"
+	"github.com/aws/karpenter/pkg/providers/securitygroup"
+	"github.com/aws/karpenter/pkg/providers/subnet"
 	"github.com/aws/karpenter/pkg/utils/project"
 
 	"github.com/aws/karpenter-core/pkg/operator/controller"
 )
 
-func NewControllers(ctx awscontext.Context, cloudProvider *cloudprovider.CloudProvider) []controller.Controller {
+func NewControllers(ctx context.Context, sess *session.Session, clk clock.Clock, kubeClient client.Client, recorder events.Recorder,
+	unavailableOfferings *cache.UnavailableOfferings, cloudProvider *cloudprovider.CloudProvider, subnetProvider *subnet.Provider,
+	securityGroupProvider *securitygroup.Provider, pricingProvider *pricing.Provider, amiProvider *amifamily.Provider) []controller.Controller {
+
 	logging.FromContext(ctx).With("version", project.Version).Debugf("discovered version")
 
+	linkController := machinelink.NewController(kubeClient, cloudProvider)
 	controllers := []controller.Controller{
-		nodetemplate.NewController(ctx.KubeClient, ctx.SubnetProvider, ctx.SecurityGroupProvider),
+		nodetemplate.NewController(kubeClient, subnetProvider, securityGroupProvider, amiProvider),
+		linkController,
+		machinegarbagecollection.NewController(kubeClient, cloudProvider, linkController),
 	}
 	if settings.FromContext(ctx).InterruptionQueueName != "" {
-		controllers = append(controllers, interruption.NewController(ctx.KubeClient, ctx.Clock, ctx.EventRecorder, interruption.NewSQSProvider(sqs.New(ctx.Session)), ctx.UnavailableOfferingsCache))
+		controllers = append(controllers, interruption.NewController(kubeClient, clk, recorder, interruption.NewSQSProvider(sqs.New(sess)), unavailableOfferings))
+	}
+	if settings.FromContext(ctx).IsolatedVPC {
+		logging.FromContext(ctx).Infof("assuming isolated VPC, pricing information will not be updated")
+	} else {
+		controllers = append(controllers, pricing.NewController(pricingProvider))
 	}
 	return controllers
 }

@@ -15,9 +15,7 @@ limitations under the License.
 package interruption
 
 import (
-	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -48,9 +46,6 @@ func TestInterruption(t *testing.T) {
 	BeforeSuite(func() {
 		env = aws.NewEnvironment(t)
 	})
-	AfterSuite(func() {
-		env.Stop()
-	})
 	RunSpecs(t, "Interruption")
 }
 
@@ -59,7 +54,6 @@ var _ = BeforeEach(func() {
 	env.ExpectQueueExists()
 })
 var _ = AfterEach(func() { env.Cleanup() })
-var _ = AfterEach(func() { env.ForceCleanup() })
 var _ = AfterEach(func() { env.AfterEach() })
 
 var _ = Describe("Interruption", Label("AWS"), func() {
@@ -77,7 +71,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 					Values:   []string{v1alpha5.CapacityTypeSpot},
 				},
 			},
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 		})
 		numPods := 1
 		dep := test.Deployment(test.DeploymentOptions{
@@ -96,39 +90,19 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 		env.EventuallyExpectHealthyPodCount(selector, numPods)
 		env.ExpectCreatedNodeCount("==", 1)
 
-		ctx, cancel := context.WithCancel(env.Context)
-		defer cancel() // In case the test fails, we need this so that the goroutine monitoring the events is closed
-
 		node := env.Monitor.CreatedNodes()[0]
 		instanceID, err := utils.ParseInstanceID(node.Spec.ProviderID)
 		Expect(err).ToNot(HaveOccurred())
 
-		By("Interrupting the spot instance")
-		_, events, err := env.InterruptionAPI.Interrupt(env.Context, []string{instanceID}, 0, true)
-		Expect(err).ToNot(HaveOccurred())
+		By("interrupting the spot instance")
+		exp := env.ExpectSpotInterruptionExperiment(instanceID)
+		DeferCleanup(func() {
+			env.ExpectExperimentTemplateDeleted(*exp.ExperimentTemplateId)
+		})
 
-		// Monitor the events channel
-		done := make(chan struct{})
-		go func() {
-			defer GinkgoRecover()
-			defer fmt.Println("[FIS EVENT MONITOR] Closing event goroutine monitoring")
-			for {
-				select {
-				case event := <-events:
-					if strings.Contains(event.Message, "Spot Instance Shutdown sent") {
-						Fail("Node didn't terminate before spot instance shutdown was sent")
-					}
-					fmt.Printf("[FIS EVENT MONITOR] %s\n", event.Message)
-				case <-done:
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-
-		env.EventuallyExpectNotFound(node)
-		close(done) // Once the node is gone, we can close the event channel because the test has effectively succeeded
+		// We are expecting the node to be terminated before the termination is complete
+		By("waiting to receive the interruption and terminate the node")
+		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Second * 110).Should(Succeed())
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 	It("should terminate the node at the API server when the EC2 instance is stopped", func() {
@@ -145,7 +119,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 					Values:   []string{v1alpha5.CapacityTypeOnDemand},
 				},
 			},
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 		})
 		numPods := 1
 		dep := test.Deployment(test.DeploymentOptions{
@@ -167,8 +141,8 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 		node := env.Monitor.CreatedNodes()[0]
 
 		By("Stopping the EC2 instance without the EKS cluster's knowledge")
-		env.ExpectInstanceStopped(node.Name)                                 // Make a call to the EC2 api to stop the instance
-		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute) // shorten the timeout since we should react faster
+		env.ExpectInstanceStopped(node.Name)                                                   // Make a call to the EC2 api to stop the instance
+		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute).Should(Succeed()) // shorten the timeout since we should react faster
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 	It("should terminate the node at the API server when the EC2 instance is terminated", func() {
@@ -185,7 +159,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 					Values:   []string{v1alpha5.CapacityTypeOnDemand},
 				},
 			},
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 		})
 		numPods := 1
 		dep := test.Deployment(test.DeploymentOptions{
@@ -207,8 +181,8 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 		node := env.Monitor.CreatedNodes()[0]
 
 		By("Terminating the EC2 instance without the EKS cluster's knowledge")
-		env.ExpectInstanceTerminated(node.Name)                              // Make a call to the EC2 api to stop the instance
-		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute) // shorten the timeout since we should react faster
+		env.ExpectInstanceTerminated(node.Name)                                                // Make a call to the EC2 api to stop the instance
+		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute).Should(Succeed()) // shorten the timeout since we should react faster
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 	It("should terminate the node when receiving a scheduled change health event", func() {
@@ -225,7 +199,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 					Values:   []string{v1alpha5.CapacityTypeOnDemand},
 				},
 			},
-			ProviderRef: &v1alpha5.ProviderRef{Name: provider.Name},
+			ProviderRef: &v1alpha5.MachineTemplateRef{Name: provider.Name},
 		})
 		numPods := 1
 		dep := test.Deployment(test.DeploymentOptions{
@@ -250,7 +224,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 
 		By("Creating a scheduled change health event in the SQS message queue")
 		env.ExpectMessagesCreated(scheduledChangeMessage(env.Region, "000000000000", instanceID))
-		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute) // shorten the timeout since we should react faster
+		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute).Should(Succeed()) // shorten the timeout since we should react faster
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 })

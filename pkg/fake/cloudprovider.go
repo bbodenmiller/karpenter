@@ -57,17 +57,21 @@ func (c *CloudProvider) GetInstanceTypes(_ context.Context, _ *v1alpha5.Provisio
 	}, nil
 }
 
-func (c *CloudProvider) IsMachineDrifted(_ context.Context, machine *v1alpha5.Machine) (bool, error) {
+func (c *CloudProvider) IsMachineDrifted(_ context.Context, machine *v1alpha5.Machine) (corecloudprovider.DriftReason, error) {
 	nodeAMI := machine.Labels[v1alpha1.LabelInstanceAMIID]
 	for _, ami := range c.ValidAMIs {
 		if nodeAMI == ami {
-			return false, nil
+			return "", nil
 		}
 	}
-	return true, nil
+	return "drifted", nil
 }
 
 func (c *CloudProvider) Get(context.Context, string) (*v1alpha5.Machine, error) {
+	return nil, nil
+}
+
+func (c *CloudProvider) List(context.Context) ([]*v1alpha5.Machine, error) {
 	return nil, nil
 }
 

@@ -36,11 +36,10 @@ Yes, as long as the controller has network and IAM/RBAC access to the Kubernetes
 ## Compatibility
 
 ### Which versions of Kubernetes does Karpenter support?
-Karpenter is tested with Kubernetes v1.20-v1.24.
+Karpenter is tested with [all currently supported EKS versions](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html). As with all EKS supported versions, Karpenter will [support a version for 14 months after it is first made available](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html#version-deprecation).
 
 ### What Kubernetes distributions are supported?
-Karpenter documents integration with a fresh install of the latest AWS Elastic Kubernetes Service (EKS).
-Existing EKS distributions can be used, but this use case has not yet been documented.
+Karpenter documents integration with a fresh or existing install of the latest AWS Elastic Kubernetes Service (EKS).
 Other Kubernetes distributions (KOPs, etc.) can be used, but setting up cloud provider permissions for those distributions has not been documented.
 
 ### How does Karpenter interact with AWS node group features?
@@ -119,6 +118,11 @@ If the instance type is unavailable for some reason, then fleet will move on to 
 If you are using the spot capacity type, Karpenter uses the price-capacity-optimized allocation strategy. This tells fleet to find the instance type that EC2 has the most capacity for while also considering price. This allocation strategy will balance cost and decrease the probability of a spot interruption happening in the near term.
 See [Choose the appropriate allocation strategy](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-fleet-allocation-strategy.html#ec2-fleet-allocation-use-cases) for information on fleet optimization.
 
+### How does Karpenter calculate the resource usage of Daemonsets when simulating scheduling?
+
+Karpenter currently calculates the applicable daemonsets at the provisioner level with label selectors/taints, etc. It does not look to see if there are requirements on the daemonsets that would exclude it from running on particular instances that the provisioner could or couldn't launch.
+The recommendation for now is to use multiple provisioners with taints/tolerations or label selectors to limit daemonsets to only nodes launched from specific provisioners.
+
 ### What if there is no Spot capacity? Will Karpenter use On-Demand?
 
 The best defense against running out of Spot capacity is to allow Karpenter to provision as many different instance types as possible.
@@ -151,6 +155,10 @@ spec:
 
 For more documentation on enabling IPv6 with the Amazon VPC CNI, see the [docs](https://docs.aws.amazon.com/eks/latest/userguide/cni-ipv6.html).
 
+{{% alert title="Windows Support Notice" color="warning" %}}
+Windows nodes do not support IPv6.
+{{% /alert %}}
+
 ## Scheduling
 
 ### When using preferred scheduling constraints, Karpenter launches the correct number of nodes at first.  Why do they then sometimes get consolidated immediately?
@@ -158,6 +166,23 @@ For more documentation on enabling IPv6 with the Amazon VPC CNI, see the [docs](
 `kube-scheduler` is responsible for the scheduling of pods, while Karpenter launches the capacity. When using any sort of preferred scheduling constraint, `kube-scheduler` will schedule pods to nodes anytime it is possible.
 
 As an example, suppose you scale up a deployment with a preferred zonal topology spread and none of the newly created pods can run on your existing cluster.  Karpenter will then launch multiple nodes to satisfy that preference.  If a) one of the nodes becomes ready slightly faster than other nodes and b) has enough capacity for multiple pods, `kube-scheduler` will schedule as many pods as possible to the single ready node so they won't remain unschedulable. It doesn't consider the in-flight capacity that will be ready in a few seconds.  If all of the pods fit on the single node, the remaining nodes that Karpenter has launched aren't needed when they become ready and consolidation will delete them.
+
+### When deploying an additional DaemonSet to my cluster, why does Karpenter not scale-up my nodes to support the extra DaemonSet?
+
+Karpenter will not scale-up more capacity for an additional DaemonSet on its own. This is due to the fact that the only pod that would schedule to that new node would be the DaemonSet pod, which is consuming additional capacity with no benefit. Therefore, Karpenter only considers DaemonSets when doing overhead calculations for scale-ups to workload pods.
+
+To avoid new DaemonSets failing to schedule to existing Nodes, you should [set a high priority on your DaemonSet pods with a `preemptionPolicy: PreemptLowerPriority`](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/#example-priorityclass) so that DaemonSet pods will be guaranteed to schedule on all existing and new Nodes. For existing Nodes, this will cause some pods with lower priority to get [preempted](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/#preemption), replaced by the DaemonSet and re-scheduled onto new capacity that Karpenter will launch in response to the new pending pods.
+
+The Karpenter maintainer team is also discussing a consolidation mechanism [in this Github issue](https://github.com/aws/karpenter/issues/3256) that would allow existing capacity to be rolled when a new DaemonSet is deployed without having to set [priority or preemption](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) on the pods.
+
+
+### Why aren’t my Topology Spread Constraints spreading pods across zones?
+
+Karpenter will provision nodes according to `topologySpreadConstraints`. However, the Kubernetes scheduler may schedule pods to nodes that do not fulfill zonal spread constraints if the `minDomains` field is not set. If Karpenter launches nodes that can handle more than the required number of pods, and the newly launched nodes initialize at different times, then the Kubernetes scheduler may place more than the desired number of pods on the first node that is Ready.
+
+The preferred solution is to use the [`minDomains` field in `topologySpreadConstraints`](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/#topologyspreadconstraints-field), which is enabled by default starting in Kubernetes 1.27.
+
+Before `minDomains` was available, another workaround has been to launch a lower [Priority](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) pause container to each zone before launching the pods that you want to spread across the zones. The lower Priority on these pause pods would mean that they would be preempted when your desired pods are scheduled.
 
 ## Workloads
 
@@ -169,13 +194,23 @@ See [Application developer]({{< ref "./concepts/#application-developer" >}}) for
 Yes.  See [Persistent Volume Topology]({{< ref "./concepts/scheduling#persistent-volume-topology" >}}) for details.
 
 ### Can I set `--max-pods` on my nodes?
-Not yet.
+Yes, see the [KubeletConfiguration Section in the Provisioners Documentation]({{<ref "./concepts/provisioners#speckubeletconfiguration" >}}) to learn more.
+
+### Why do the Windows2019 and Windows2022 AMI families only support Windows Server Core?
+The difference between the Core and Full variants is that Core is a minimal OS with less components and no graphic user interface (GUI) or desktop experience.
+`Windows2019` and `Windows2022` AMI families use the Windows Server Core option for simplicity, but if required, you can specify a custom AMI to run Windows Server Full.
+
+You can specify the [Amazon EKS optimized AMI](https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-windows-ami.html) with Windows Server 2022 Full for Kubernetes 1.27 by configuring an `amiSelector` that references the AMI name.
+```
+amiSelector:
+    aws::name: Windows_Server-2022-English-Full-EKS_Optimized-1.27*
+```
 
 ## Deprovisioning
 ### How does Karpenter deprovision nodes?
 See [Deprovisioning nodes]({{< ref "./concepts/deprovisioning" >}}) for information on how Karpenter deprovisions nodes.
 
-## Upgrading
+## Upgrading Karpenter
 
 ### How do I upgrade Karpenter?
 Karpenter is a controller that runs in your cluster, but it is not tied to a specific Kubernetes version, as the Cluster Autoscaler is.
@@ -195,6 +230,14 @@ error: error validating "provisioner.yaml": error validating data: ValidationErr
 ```
 
 The `startupTaints` parameter was added in v0.10.0.  Helm upgrades do not upgrade the CRD describing the provisioner, so it must be done manually. For specific details, see the [Upgrade Guide]({{< ref "./upgrade-guide/#upgrading-to-v0100" >}})
+
+## Upgrading Kubernetes Cluster
+
+### How do I upgrade an EKS Cluster with Karpenter?
+
+When upgrading an Amazon EKS cluster, [Karpenter's Drift feature]({{<ref "./concepts/deprovisioning#drift" >}}) can automatically upgrade the Karpenter-provisioned nodes to stay in-sync with the EKS control plane. Karpenter Drift currently needs to be enabled using a [feature gate]({{<ref "./concepts/settings#feature-gates" >}}). Karpenter's default [AWSNodeTemplate `amiFamily` configuration]({{<ref "./concepts/node-templates#specamifamily" >}}) uses the latest EKS Optimized AL2 AMI for the same major and minor version as the EKS cluster's control plane. Karpenter's AWSNodeTemplate can be configured to not use the EKS optimized AL2 AMI in favor of a custom AMI by configuring the [`amiSelector`]({{<ref "./concepts/node-templates#specamiselector" >}}). If using a custom AMI, you will need to trigger the rollout of this new worker node image through the publication of a new AMI with tags matching the [`amiSelector`]({{<ref "./concepts/node-templates#specamiselector" >}}), or a change to the [`amiSelector`]({{<ref "./concepts/node-templates#specamiselector" >}}) field.
+
+Start by [upgrading the EKS Cluster control plane](https://docs.aws.amazon.com/eks/latest/userguide/update-cluster.html). After the EKS Cluster upgrade completes, Karpenter's Drift feature will detect that the Karpenter-provisioned nodes are using EKS Optimized AMIs for the previous cluster version, and [automatically cordon, drain, and replace those nodes]({{<ref "./concepts/deprovisioning#control-flow" >}}). To support pods moving to new nodes, follow Kubernetes best practices by setting appropriate pod [Resource Quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/), and using [Pod Disruption Budgets](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/) (PDB). Karpenter's Drift feature will spin up replacement nodes based on the pod resource requests, and will respect the PDBs when deprovisioning nodes.
 
 ## Interruption Handling
 
@@ -218,3 +261,11 @@ Details on provisioning the SQS queue and EventBridge rules can be found in the 
 ### Why do I sometimes see an extra node get launched when updating a deployment that remains empty and is later removed?
 
 Consolidation packs pods tightly onto nodes which can leave little free allocatable CPU/memory on your nodes.  If a deployment uses a deployment strategy with a non-zero `maxSurge`, such as the default 25%, those surge pods may not have anywhere to run. In this case, Karpenter will launch a new node so that the surge pods can run and then remove it soon after if it's not needed.
+
+## Logging
+
+### How do I customize or configure the log output?
+
+Karpenter uses [uber-go/zap](https://github.com/uber-go/zap) for logging. You can customize or configure the log messages by editing the [configmap-logging.yaml](https://github.com/aws/karpenter/blob/main/charts/karpenter/templates/configmap-logging.yaml)
+`ConfigMap`'s [data.zap-logger-config](https://github.com/aws/karpenter/blob/main/charts/karpenter/templates/configmap-logging.yaml#L26) field.
+The available configuration options are specified in the [zap.Config godocs](https://pkg.go.dev/go.uber.org/zap#Config).
